@@ -2,6 +2,8 @@
 
 This repository contains the official baseline code for the FOMO25 Challenge, which investigates the few-shot generalization properties of foundation models for brain MRI data analysis.
 
+Please note: This codebase will be continually refined, so check back occasionally to get the latest updates.
+
 ## 🔍 Challenge Overview
 
 The FOMO25 Challenge seeks to advance the field of medical image analysis by evaluating the same pretrained models across multiple downstream tasks. Participants will first pretrain on a large unlabelled dataset and then evaluate their models on three clinical, multi-vendor, and multi-center datasets. For more information on the challenge, please visit the [FOMO25 Challenge website](https://fomo25.github.io).

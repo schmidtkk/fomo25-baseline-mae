@@ -25,7 +25,7 @@ This codebase supports three tasks:
 3. **Task 3: Brain Age Regression** - Predicting patient age from MRI scans
 
 Data for the challenge includes:
-- **Pretraining Data**: 13,225 subjects, 16,727 sessions, 60,551 scans
+- **Pretraining Data**: 11,187 subjects, 13,900 sessions, 60,529 scans
 - **Finetuning Data**: Limited few-shot data (~20-200 cases per task)
 - **Evaluation Data**: Unseen data for final assessment
 
@@ -49,7 +49,7 @@ pip install -e ".[dev,test]"
 
 ## Data Preparation
 
-While the data included in this challenge is already preprocessed (co-registered, transposed to RAS orientation and defaced/desculled), to run this code, one needs to further preprocess with the following _highly opinionated preprocessing_ steps.
+While the data included in this challenge is already preprocessed (co-registered, transposed to RAS orientation and defaced/skull-stripped), to run this code, one needs to further preprocess with the following _highly opinionated preprocessing_ steps.
 
 This "Opinionated Preprocessing" can be done in the following way
 

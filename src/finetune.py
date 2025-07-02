@@ -5,7 +5,7 @@ import os
 import logging
 import torch
 import lightning as L
-import wandb
+# import wandb
 from lightning.pytorch.callbacks import ModelCheckpoint
 
 from models.supervised_base import BaseSupervisedModel
@@ -32,7 +32,8 @@ from yucca.modules.callbacks.loggers import YuccaLogger
 from yucca.pipeline.configuration.split_data import get_split_config
 from yucca.pipeline.configuration.configure_paths import detect_version
 from data.dataset import CLSDataset
-from data.task_configs import task1_config, task2_config, task3_config
+from data.task_configs import task1_config, task2_config, task3_config, hbn_config
+from torch.utils.data import SequentialSampler
 
 
 def get_task_config(taskid):
@@ -42,6 +43,8 @@ def get_task_config(taskid):
         task_cfg = task2_config
     elif taskid == 3:
         task_cfg = task3_config
+    elif taskid == 4:
+        task_cfg = hbn_config
     else:
         raise ValueError(f"Unknown taskid: {taskid}. Supported IDs are 1, 2, and 3")
 
@@ -274,8 +277,8 @@ def main():
         splits_config=splits_config,
         split_idx=config["split_idx"],
         num_workers=args.num_workers,
+        val_sampler=SequentialSampler,
     )
-
     # Print dataset information
     print("Train dataset: ", data_module.splits_config.train(config["split_idx"]))
     print("Val dataset: ", data_module.splits_config.val(config["split_idx"]))
@@ -287,18 +290,18 @@ def main():
     )
 
     # Initialize wandb logging
-    wandb.init(
-        project="fomo-finetuning",
-        name=f"{config['experiment']}_version_{config['version']}",
-    )
+    # wandb.init(
+    #     project="fomo-finetuning",
+    #     name=f"{config['experiment']}_version_{config['version']}",
+    # )
 
-    # Create wandb logger for Lightning
-    wandb_logger = L.pytorch.loggers.WandbLogger(
-        project="fomo-finetuning",
-        name=f"{config['experiment']}_version_{config['version']}",
-        log_model=True,
-    )
-    loggers.append(wandb_logger)
+    # # Create wandb logger for Lightning
+    # wandb_logger = L.pytorch.loggers.WandbLogger(
+    #     project="fomo-finetuning",
+    #     name=f"{config['experiment']}_version_{config['version']}",
+    #     log_model=True,
+    # )
+    # loggers.append(wandb_logger)
 
     # Create model and trainer
     model = BaseSupervisedModel.create(
@@ -337,6 +340,7 @@ def main():
         )
         # Load and adjust weights from pretrained model
         state_dict = load_pretrained_weights(args.pretrained_weights_path, args.compile)
+        state_dict = state_dict['state_dict']
 
         # Transfer weights to new model
         num_successful_weights_transferred = model.load_state_dict(
@@ -350,7 +354,7 @@ def main():
 
     # Start training
     trainer.fit(model=model, datamodule=data_module, ckpt_path="last")
-    wandb.finish()
+    # wandb.finish()
 
 
 if __name__ == "__main__":

@@ -32,20 +32,20 @@ task3_config = {
     "norm_op": "volume_wise_znorm",
     "num_classes": 1,  # For regression, output dimension is 1
     "keep_aspect_ratio": True,
-    "task_type": "classification",
+    "task_type": "regression",
     "label_extension": ".txt",
     "labels": {"regression": "Age"},  # Define as regression task
 }
 
 hbn_config = {
-    "task_name": "Task004_FOMO4",
+    "task_name": "Task004_HBN",
     "crop_to_nonzero": True,
     "deep_supervision": False,
     "modalities": ("T1w",),  # Single T1w modality
     "norm_op": "volume_wise_znorm",
     "num_classes": 1,  # For regression, output dimension is 1
     "keep_aspect_ratio": True,
-    "task_type": "classification",
+    "task_type": "regression",
     "label_extension": ".txt",
     "labels": {"regression": "Age"},  # Age regression task for HBN dataset
 }

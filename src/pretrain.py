@@ -64,6 +64,13 @@ def main():
     parser.add_argument("--compile_mode", type=str, default=None)
     parser.add_argument("--new_version", action="store_true")
     parser.add_argument("--optimizer", type=str, default="AdamW")
+    parser.add_argument(
+        "--modality_mode",
+        type=str,
+        default="all",
+        choices=["all", "t1", "t2", "flair", "dwi", "other"],
+        help="Select which modality subset to pretrain on: single modality, 'other' group (scan,pd,swi,t2s) or all.",
+    )
 
     parser.add_argument(
         "--augmentation_preset",
@@ -122,7 +129,7 @@ def main():
         path_config=path_config,
     )
 
-    # configuration dictionary
+    # preliminary configuration dictionary (dataset sizes will be inserted after datamodule setup)
     config = {
         # Experiment information
         "experiment": args.experiment,
@@ -159,9 +166,9 @@ def main():
         # Hardware configuration
         "num_devices": args.num_devices,
         "num_workers": args.num_workers,
-        # Dataset metrics
-        "train_dataset_size": len(splits_config.train(0)),
-        "val_dataset_size": len(splits_config.val(0)),
+    # Dataset metrics placeholders, will fill after filtering
+    "train_dataset_size": None,
+    "val_dataset_size": None,
         # Trainer specific params
         "fast_dev_run": args.fast_dev_run,
         "limit_val_batches": args.limit_val_batches,
@@ -170,22 +177,6 @@ def main():
         "check_val_every_n_epoch": args.check_val_every_n_epoch,
         "accumulate_grad_batches": args.accumulate_grad_batches,
     }
-
-    # Calculate training metrics based on the config
-    steps_per_epoch = (
-        int(config["train_dataset_size"] / config["effective_batch_size"])
-        if config["overfit_batches"] == 0
-        else config["overfit_batches"]
-    )
-    max_iterations = int(config["epochs"] * steps_per_epoch)
-    config["steps_per_epoch"] = steps_per_epoch
-    config["max_iterations"] = max_iterations
-
-    print(
-        f"Starting training with {max_iterations} max iterations over {config['epochs']} epochs "
-        f"with {config['train_dataset_size']} training datapoints, {config['val_dataset_size']} validation datapoints, "
-        f"and an effective batch size of {config['effective_batch_size']}"
-    )
 
     # Set up data augmentation and datamodule
     train_transforms = get_pretrain_augmentations(
@@ -200,8 +191,44 @@ def main():
         splits_config=splits_config,
         split_idx=0,
         train_data_dir=train_data_dir,
+        modality_mode=args.modality_mode,
         composed_train_transforms=train_transforms,
         composed_val_transforms=val_transforms,
+    )
+    # Need to setup to know filtered dataset sizes
+    data.setup("fit")
+
+    config["train_dataset_size"] = len(data.train_samples)
+    config["val_dataset_size"] = len(data.val_samples)
+
+    # Calculate training metrics based on the filtered dataset
+    steps_per_epoch = (
+        int(config["train_dataset_size"] / config["effective_batch_size"])
+        if config["overfit_batches"] == 0 and config["train_dataset_size"] > 0
+        else config["overfit_batches"]
+    )
+    # ensure at least 1 step when overfit_batches==0
+    if steps_per_epoch == 0:
+        steps_per_epoch = 1
+    max_iterations = int(config["epochs"] * steps_per_epoch)
+    config["steps_per_epoch"] = steps_per_epoch
+    config["max_iterations"] = max_iterations
+
+    # Log modality stats
+    modality_stats = getattr(data, "modality_stats", {})
+    print(
+        f"Modality mode: {args.modality_mode} | Train size: {config['train_dataset_size']} | Val size: {config['val_dataset_size']}"
+    )
+    if modality_stats:
+        print(f"Train modalities kept: {modality_stats.get('train', {}).get('kept_modalities', {})}")
+        print(f"Train modalities dropped: {modality_stats.get('train', {}).get('dropped_modalities', {})}")
+        print(f"Val modalities kept: {modality_stats.get('val', {}).get('kept_modalities', {})}")
+        print(f"Val modalities dropped: {modality_stats.get('val', {}).get('dropped_modalities', {})}")
+
+    print(
+        f"Starting training with {max_iterations} max iterations over {config['epochs']} epochs "
+        f"with {config['train_dataset_size']} training datapoints, {config['val_dataset_size']} validation datapoints, "
+        f"and an effective batch size of {config['effective_batch_size']}"
     )
 
     # Create model and trainer

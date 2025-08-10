@@ -117,12 +117,14 @@ class PretrainDataset(Dataset):
         data_dir: str,
         pre_aug_patch_size: Optional[Tuple[int, int, int]] = None,
         composed_transforms: Optional[torchvision.transforms.Compose] = None,
+        disable_memmap: bool = False,
     ):
         self.all_files = samples
         self.data_dir = data_dir
         self.composed_transforms = composed_transforms
         self.patch_size = patch_size
         self.pre_aug_patch_size = pre_aug_patch_size
+        self.disable_memmap = disable_memmap
 
         self.croppad = CropPad(patch_size=self.pre_aug_patch_size or self.patch_size)
         self.to_torch = NumpyToTorch()
@@ -148,7 +150,7 @@ class PretrainDataset(Dataset):
         data_dict["image"] = data
         res = self._transform(data_dict, metadata)
         end = time.time()
-        print(f"Loaded {case} with shape {data.shape} in {end - begin:.2f} seconds (load: {mid - begin:.2f}, transform: {end - mid:.2f})")
+        # print(f"Loaded {case} with shape {data.shape} in {end - begin:.2f} seconds (load: {mid - begin:.2f}, transform: {end - mid:.2f})")
         return res
 
     def _transform(self, data_dict, metadata=None):
@@ -166,10 +168,15 @@ class PretrainDataset(Dataset):
         file = file + ".npy"
         path = join(self.data_dir, file)
 
-        try:
-            vol = np.load(path, "r")
-        except ValueError:
-            vol = np.load(path, allow_pickle=True)
+        if self.disable_memmap:
+            # Load directly into memory (faster for small files, avoids memmap overhead)
+            vol = np.load(path)
+        else:
+            # Use memory mapping (original behavior)
+            try:
+                vol = np.load(path, "r")
+            except ValueError:
+                vol = np.load(path, allow_pickle=True)
 
         # Add channel dimension if it doesn't exist
         if len(vol.shape) == 3:

@@ -91,6 +91,22 @@ def main():
         default=25,
         help="Save a checkpoint every N epochs",
     )
+    parser.add_argument(
+        "--skip_sanity_check",
+        action="store_true",
+        help="Skip Lightning validation sanity check (num_sanity_val_steps=0)",
+    )
+    parser.add_argument(
+        "--prefetch_factor",
+        type=int,
+        default=2,
+        help="DataLoader prefetch factor (default: 2, original was 16)",
+    )
+    parser.add_argument(
+        "--disable_memmap",
+        action="store_true",
+        help="Load full arrays instead of using memory mapping (faster for small files)",
+    )
 
     parser.add_argument(
         "--experiment", type=str, default="base_experiment", help="name of experiment"
@@ -109,7 +125,11 @@ def main():
 
     # Path where logs, checkpoints etc is stored
     save_dir = os.path.join(
-        args.save_dir, "models", os.path.basename(train_data_dir), args.model_name
+        args.save_dir, 
+        "models", 
+        os.path.basename(train_data_dir), 
+        args.model_name,
+        args.experiment
     )
     versions_dir = os.path.join(save_dir, "versions")
     continue_from_most_recent = not args.new_version
@@ -176,6 +196,11 @@ def main():
         "overfit_batches": args.overfit_batches,
         "check_val_every_n_epoch": args.check_val_every_n_epoch,
         "accumulate_grad_batches": args.accumulate_grad_batches,
+    # Trainer tweak flags
+            # Trainer tweak flags
+        "skip_sanity_check": args.skip_sanity_check,
+        "prefetch_factor": args.prefetch_factor,
+        "disable_memmap": args.disable_memmap,
     }
 
     # Set up data augmentation and datamodule
@@ -194,6 +219,8 @@ def main():
         modality_mode=args.modality_mode,
         composed_train_transforms=train_transforms,
         composed_val_transforms=val_transforms,
+        prefetch_factor=config["prefetch_factor"],
+        disable_memmap=config["disable_memmap"],
     )
     # Need to setup to know filtered dataset sizes
     data.setup("fit")
@@ -288,7 +315,7 @@ def main():
         limit_train_batches=config["limit_train_batches"],
         overfit_batches=config["overfit_batches"],
         check_val_every_n_epoch=config["check_val_every_n_epoch"],
-        num_sanity_val_steps=0 if config["overfit_batches"] > 0 else 2,
+    num_sanity_val_steps=0 if (config["overfit_batches"] > 0 or config["skip_sanity_check"]) else 2,
         accumulate_grad_batches=config["accumulate_grad_batches"],
     )
 

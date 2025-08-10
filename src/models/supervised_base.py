@@ -31,6 +31,9 @@ class BaseSupervisedModel(L.LightningModule):
     ):
         super().__init__()
 
+        # Keep full config for later reference
+        self.config = config
+
         self.num_classes = config["num_classes"]
         self.num_modalities = config["num_modalities"]
         self.patch_size = config["patch_size"]
@@ -121,6 +124,17 @@ class BaseSupervisedModel(L.LightningModule):
             "mode": self.task_type,  # Pass task_type directly
         }
         model_kwargs = filter_kwargs(model_class, model_kwargs)
+        # Multi-encoder integration (optional via config)
+        use_multi_encoder = bool(self.config.get("use_multi_encoder", False))
+        if use_multi_encoder:
+            multi_modalities = list(self.config.get("multi_encoder_modalities", []))
+            model_kwargs.update(
+                {
+                    "use_multi_encoder": True,
+                    "multi_encoder_modalities": multi_modalities,
+                    "multi_encoder_num_modalities_global": len(multi_modalities) if len(multi_modalities) > 0 else None,
+                }
+            )
         self.model = model_class(**model_kwargs)
 
     def configure_optimizers(self):

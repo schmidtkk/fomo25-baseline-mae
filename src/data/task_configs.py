@@ -2,7 +2,9 @@ task1_config = {
     "task_name": "Task001_FOMO1",
     "crop_to_nonzero": True,
     "deep_supervision": False,
-    "modalities": ("DWI", "T2FLAIR", "SWI_OR_T2STAR"),
+    # Canonical 4-modality order for FOMO1 finetuning
+    # [0] DWI, [1] ADC, [2] T2 FLAIR, [3] SWI or T2*
+    "modalities": ("DWI", "ADC", "T2FLAIR", "SWI_OR_T2STAR"),
     "norm_op": "volume_wise_znorm",
     "num_classes": 2,
     "keep_aspect_ratio": True,

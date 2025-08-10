@@ -26,6 +26,8 @@ class PretrainDataModule(pl.LightningDataModule):
         val_sampler: Optional[Sampler] = None,
         composed_train_transforms: Optional[Compose] = None,
         composed_val_transforms: Optional[Compose] = None,
+        prefetch_factor: int = 2,
+        disable_memmap: bool = False,
     ) -> None:
         super().__init__()
         self.batch_size = batch_size
@@ -51,6 +53,8 @@ class PretrainDataModule(pl.LightningDataModule):
         )
         self.train_sampler = train_sampler
         self.val_sampler = val_sampler
+        self.prefetch_factor = prefetch_factor
+        self.disable_memmap = disable_memmap
 
         self.modality_stats: Dict = {}
 
@@ -130,12 +134,14 @@ class PretrainDataModule(pl.LightningDataModule):
             composed_transforms=self.composed_train_transforms,
             pre_aug_patch_size=self.pre_aug_patch_size,  # type: ignore
             patch_size=self.patch_size,
+            disable_memmap=self.disable_memmap,
         )
         self.val_dataset = PretrainDataset(
             self.val_samples,
             data_dir=self.train_data_dir,
             composed_transforms=self.composed_val_transforms,
             patch_size=self.patch_size,
+            disable_memmap=self.disable_memmap,
         )
 
     def train_dataloader(self):
@@ -145,7 +151,7 @@ class PretrainDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             batch_size=self.batch_size,
             pin_memory=torch.cuda.is_available(),
-            prefetch_factor=16,
+            prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
             sampler=sampler,
             shuffle=sampler is None,
         )
@@ -157,6 +163,7 @@ class PretrainDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             batch_size=self.batch_size,
             pin_memory=torch.cuda.is_available(),
+            prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
             sampler=sampler,
         )
 

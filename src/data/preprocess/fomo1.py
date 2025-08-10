@@ -40,7 +40,8 @@ def process_subject(task_info):
 
         subject_id = folder_name.replace(".", "_")
 
-        # Collect images for all modalities
+        # Collect images for all modalities in canonical order:
+        # 0=DWI, 1=ADC, 2=T2FLAIR, 3=SWI_OR_T2STAR (prefer SWI if both present)
         image_files = []
         modality_mapping = {}
 
@@ -48,32 +49,40 @@ def process_subject(task_info):
             if not file.endswith(".nii.gz"):
                 continue
 
-            # Determine modality
-            if "dwi" in file:
+            # Determine modality (case-insensitive)
+            f = file.lower()
+            modality_index = None
+            if "dwi" in f:
                 modality_index = 0  # DWI
-            elif "flair" in file:
-                modality_index = 1  # T2FLAIR
-            elif "adc" in file:
-                modality_index = 2  # ADC
-            elif "swi" in file or "t2s" in file:
+            elif "adc" in f:
+                modality_index = 1  # ADC (index 1 in task1_config)
+            elif "flair" in f:
+                modality_index = 2  # T2FLAIR
+            elif ("swi" in f) or ("t2s" in f) or ("t2star" in f):
                 modality_index = 3  # SWI_OR_T2STAR
             else:
                 continue
 
             source_img = join(session_path, file)
             image_files.append(source_img)
-            modality_mapping[modality_index] = source_img
+            # Prefer SWI over T2S: if index 3 already set and new file is t2s while existing is swi, keep swi
+            if modality_index == 3 and modality_mapping.get(3) is not None:
+                # keep existing SWI if present; replace only if previous was t2s and new is swi
+                prev = modality_mapping[3]
+                if ("swi" in f) and ("swi" not in prev.lower()):
+                    modality_mapping[3] = source_img
+            else:
+                modality_mapping[modality_index] = source_img
 
         # Skip if we don't have all required modalities
         if len(image_files) < len(modalities):
             return f"Error: Not all modalities found for {folder_name}"
 
-        # Load and preprocess images
-        images = [
-            nib.load(modality_mapping[i])
-            for i in range(len(modalities))
-            if i in modality_mapping
-        ]
+        # Load and preprocess images in canonical order
+        images = []
+        for i in range(len(modalities)):
+            assert i in modality_mapping, f"Missing modality index {i} for {folder_name}"
+            images.append(nib.load(modality_mapping[i]))
 
         # Apply preprocessing
         preprocessed_images, _ = preprocess_case_for_training_without_label(

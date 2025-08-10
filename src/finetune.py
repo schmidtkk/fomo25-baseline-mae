@@ -82,6 +82,24 @@ def main():
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--compile_mode", type=str, default=None)
+    # Multi-encoder options
+    parser.add_argument("--use_multi_encoder", action="store_true")
+    parser.add_argument(
+        "--modality_ckpts",
+        type=str,
+        default=None,
+        help="Comma-separated mapping modalityGroup=abs_path for pretrain ckpts. Keys in {t1,t2,flair,dwi,other,all}",
+    )
+    parser.add_argument(
+        "--modality_mapping",
+        type=str,
+        default=None,
+        help="Comma-separated mapping finetuneMod=pretrainGroup, e.g. DWI=dwi,ADC=dwi,T2FLAIR=flair,SWI_OR_T2STAR=other",
+    )
+    parser.add_argument("--allow_missing_modalities", action="store_true")
+    parser.add_argument("--modality_dropout_p_start", type=float, default=0.2)
+    parser.add_argument("--modality_dropout_p_end", type=float, default=0.5)
+    parser.add_argument("--modality_dropout_warmup_epochs", type=int, default=50)
     # Hardware configuration
     parser.add_argument("--num_devices", type=int, default=1)
     parser.add_argument("--num_workers", type=int, default=8)
@@ -232,6 +250,8 @@ def main():
         # Model compilation
         "compile": args.compile,
         "compile_mode": args.compile_mode,
+        # Multi-encoder config
+        "use_multi_encoder": args.use_multi_encoder,
         
         # Trainer specific params
         "fast_dev_run": args.fast_dev_run,
@@ -304,6 +324,10 @@ def main():
     # loggers.append(wandb_logger)
 
     # Create model and trainer
+    # If multi-encoder, include modality names in config to build the wrapper
+    if args.use_multi_encoder:
+        config["multi_encoder_modalities"] = list(task_cfg["modalities"])
+
     model = BaseSupervisedModel.create(
         task_type=task_type,
         config=config,
@@ -338,14 +362,56 @@ def main():
             "for finetuning OR continue training without the --new_version flag, "
             "but not both."
         )
-        # Load and adjust weights from pretrained model
-        state_dict = load_pretrained_weights(args.pretrained_weights_path, args.compile)
-        state_dict = state_dict['state_dict']
+        if not args.use_multi_encoder:
+            # Single-encoder path: load directly
+            state_dict = load_pretrained_weights(args.pretrained_weights_path, args.compile)
+            state_dict = state_dict['state_dict']
+            num_successful_weights_transferred = model.load_state_dict(
+                state_dict=state_dict, strict=False
+            )
+        else:
+            # Multi-encoder: map FOMO1 modalities to pretrain groups and load per-encoder
+            assert args.modality_ckpts is not None, "--modality_ckpts required when --use_multi_encoder"
+            ckpt_map = {}
+            for kv in args.modality_ckpts.split(','):
+                if kv.strip() == "":
+                    continue
+                k, v = kv.split('=')
+                ckpt_map[k.strip()] = v.strip()
 
-        # Transfer weights to new model
-        num_successful_weights_transferred = model.load_state_dict(
-            state_dict=state_dict, strict=False
-        )
+            default_mapping = {
+                "DWI": "dwi",
+                "ADC": "dwi",
+                "T2FLAIR": "flair",
+                "SWI_OR_T2STAR": "other",
+            }
+            mapping = default_mapping.copy()
+            if args.modality_mapping is not None:
+                for kv in args.modality_mapping.split(','):
+                    if kv.strip() == "":
+                        continue
+                    k, v = kv.split('=')
+                    mapping[k.strip()] = v.strip()
+
+            merged_state = {}
+            finetune_modalities = config.get("multi_encoder_modalities", [])
+            for i, mod in enumerate(finetune_modalities):
+                group = mapping.get(mod, "all")
+                src_ckpt = ckpt_map.get(group, ckpt_map.get("all", None))
+                if src_ckpt is None:
+                    print(f"Warning: No checkpoint for group {group}. {mod} will use random init.")
+                    continue
+                sd = load_pretrained_weights(src_ckpt, args.compile)["state_dict"]
+                for k, v in sd.items():
+                    if not k.startswith("model.encoder."):
+                        continue
+                    rest = k[len("model.encoder."):]
+                    target_key = f"model.encoder.encoders.{mod}.{rest}"
+                    merged_state[target_key] = v
+
+            num_successful_weights_transferred = model.load_state_dict(
+                state_dict=merged_state, strict=False
+            )
         assert (
             num_successful_weights_transferred > 0
         ), "No weights were successfully transferred"

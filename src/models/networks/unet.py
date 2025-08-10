@@ -9,6 +9,7 @@ from models.conv_blocks.blocks import (
     MultiLayerConvDropoutNormNonlin,
 )
 from models.networks.heads import ClsRegHead
+from models.multiencoder import MultiModalEncoderWithFusion
 
 
 class UNet(YuccaNet):
@@ -28,17 +29,33 @@ class UNet(YuccaNet):
         ),
         use_skip_connections: bool = False,
         deep_supervision: bool = False,
+        use_multi_encoder: bool = False,
+        multi_encoder_modalities: list[str] | None = None,
+        multi_encoder_num_modalities_global: int | None = None,
     ):
         super().__init__()
 
         self.encoder_block = encoder_block
         self.decoder_block = decoder_block
 
-        self.encoder = UNetEncoder(
-            input_channels=input_channels,
-            starting_filters=starting_filters,
-            basic_block=encoder_block,
-        )
+        if use_multi_encoder:
+            assert multi_encoder_modalities is not None and len(multi_encoder_modalities) > 0
+            # Prepare factory to build per-modality encoders (1 input channel)
+            def _enc_factory():
+                return UNetEncoder(input_channels=1, starting_filters=starting_filters, basic_block=encoder_block)
+
+            self.encoder = MultiModalEncoderWithFusion(
+                modality_names=multi_encoder_modalities,
+                encoder_factory=_enc_factory,
+                starting_filters=starting_filters,
+                num_modalities_global=multi_encoder_num_modalities_global,
+            )
+        else:
+            self.encoder = UNetEncoder(
+                input_channels=input_channels,
+                starting_filters=starting_filters,
+                basic_block=encoder_block,
+            )
         self.num_classes = output_channels
         self.mode = mode
 
@@ -69,8 +86,12 @@ class UNet(YuccaNet):
                 "Invalid mode. Choose from 'mae', 'segmentation', 'classification', 'regression', or 'enc'"
             )
 
-    def forward(self, x):
-        enc = self.encoder(x)
+    def forward(self, x, mask: torch.Tensor | None = None, modality_ids: list[int] | None = None):
+        # Support both single-encoder and multi-encoder paths
+        try:
+            enc = self.encoder(x, mask=mask, modality_ids=modality_ids)
+        except TypeError:
+            enc = self.encoder(x)
         return self.decoder(enc)
 
 
@@ -391,6 +412,7 @@ def unet_b(
     mode: str = "segmentation",
     input_channels: int = 1,
     output_channels: int = 1,
+    **unet_kwargs,
 ):
     return UNet(
         mode=mode,
@@ -398,12 +420,14 @@ def unet_b(
         output_channels=output_channels,
         use_skip_connections=True,
         starting_filters=32,
+        **unet_kwargs,
     )
 
 
 def unet_b_lw_dec(
     input_channels: int = 1,
     output_channels: int = 1,
+    **unet_kwargs,
 ):
     unet_model = UNet(
         input_channels=input_channels,
@@ -411,6 +435,7 @@ def unet_b_lw_dec(
         decoder_block=MultiLayerConvDropoutNormNonlin.get_block_constructor(1),
         use_skip_connections=False,
         starting_filters=32,
+        **unet_kwargs,
     )
 
     return unet_model
@@ -420,12 +445,14 @@ def unet_xl(
     mode: str = "segmentation",
     input_channels: int = 1,
     output_channels: int = 1,
+    **unet_kwargs,
 ):
     return UNet(
         input_channels=input_channels,
         output_channels=output_channels,
         mode=mode,
         use_skip_connections=True,
+        **unet_kwargs,
     )
 
 
@@ -462,12 +489,14 @@ def standard_decoder(
 def unet_xl_lw_dec(
     input_channels: int = 1,
     output_channels: int = 1,
+    **unet_kwargs,
 ):
     unet_model = UNet(
         input_channels=input_channels,
         output_channels=output_channels,
         decoder_block=MultiLayerConvDropoutNormNonlin.get_block_constructor(1),
         use_skip_connections=False,
+        **unet_kwargs,
     )
 
     return unet_model

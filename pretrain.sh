@@ -2,7 +2,8 @@ DATA_DIR=/mnt/cvlab/scratch/cvlab/home/hantzhan/data/FOMO-MRI/fomo-60k-pretrain/
 SAVE_DIR=/mnt/cvlab/scratch/cvlab/home/hantzhan/code/fomo25-baseline-mae-main
 MODALITY=t1
 
-CUDA_VISIBLE_DEVICES=0 python src/pretrain.py \
+# export CUDA_VISIBLE_DEVICES=0 
+python src/pretrain.py \
     --save_dir=$SAVE_DIR \
     --pretrain_data_dir=$DATA_DIR \
     --model_name=unet_xl_lw_dec \
@@ -12,7 +13,7 @@ CUDA_VISIBLE_DEVICES=0 python src/pretrain.py \
     --warmup_epochs=5 \
     --num_workers=4 \
     --augmentation_preset=all \
-    --num_devices 1 \
+    --num_devices 8 \
     --accumulate_grad_batches 1 \
     --modality_mode $MODALITY \
     --experiment $MODALITY \

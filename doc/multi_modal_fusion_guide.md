@@ -130,6 +130,69 @@
 - Set total folds and current fold via `--k_folds K` and `--fold_index f` (0-based). Splits are stratified at subject level in fusion mode.
 - Validation logs a subject-level AUROC (`val/auroc_subject`) by aggregating per-subject predictions (mean logit) before AUROC.
 
+## New features (Task 1 finetune)
+
+- Fusion vs stacked switch
+  - `--fusion_mode fusion`: force per-modality fusion dataset (e.g., `Task001_FOMO1_fusion`) and enable multi-encoder.
+  - `--fusion_mode stacked`: legacy single `.npy` dataset and single-encoder.
+  - `--fusion_mode auto`: detect fusion folder and choose automatically (default).
+
+- Checkpoint flags (fusion and stacked)
+  - Fusion (per-group ckpts):
+    - `--dwi_ckpt`, `--flair_ckpt`, `--t1_ckpt`, `--t2_ckpt`, `--other_ckpt`
+    - Optional legacy mapping: `--modality_ckpts "dwi=/abs/dwi.ckpt,flair=/abs/flair.ckpt,..."` (no `all` fallback)
+    - Missing groups initialize randomly; this is expected and supported.
+  - Stacked (single-encoder):
+    - `--all_ckpt` (preferred) or `--pretrained_weights_path`
+
+- K-Fold controls
+  - `--k_folds K` and `--fold_index f` (0-based). In fusion mode, folds are stratified at subject-level (no leakage).
+  - Recommended for Task 1: K=3 (fallback K=2 if balance breaks).
+
+- Subject-level AUROC (Task 1)
+  - Validation logs `val/auroc_subject` computed by averaging multiple predictions per subject (if any) to a single logit, then computing AUROC.
+  - This metric is used for early stopping and best-checkpoint selection in binary classification.
+
+- Early stopping and checkpoint monitoring
+  - `--early_stop_patience` (default 12), `--early_stop_min_delta` (default 0.002)
+  - Monitored metric auto-selects `val/auroc_subject` for binary classification (else `val/loss`); best checkpoint saved as `best.ckpt`.
+
+- Two-phase finetune schedule
+  - `--freeze_encoder_epochs` (default 15): freeze encoders initially and train the head.
+  - LR controls:
+    - `--phase1_head_lr` (default 5e-4) during freeze phase.
+    - `--phase2_head_lr` (default 2e-4) and `--phase2_encoder_lr` (default 1e-5) after unfreezing.
+  - Cosine scheduler with 5-epoch warmup to 0.1× by end of training (matches repo default style).
+
+- Runtime safety and memory
+  - Use `--precision 16-mixed`, `--batch_size 1–2`, and `--patch_size 24–32` (divisible by 8). If still limited, try `--model_name unet_b`.
+
+### Example: Task 1 finetune with fusion, K-fold, AUROC, and 2-phase schedule
+```bash
+PY=/mnt/cvlab/scratch/cvlab/home/hantzhan/anaconda3/envs/fomo/bin/python
+cd /mnt/cvlab/scratch/cvlab/home/hantzhan/code/fomo25-baseline-mae-main
+
+PYTHONPATH=src "$PY" src/finetune.py \
+  --taskid 1 \
+  --data_dir /mnt/cvlab/scratch/cvlab/home/hantzhan/data/FOMO-MRI/fomo-finetune \
+  --save_dir ./runs \
+  --model_name unet_xl \
+  --fusion_mode fusion \
+  --k_folds 3 --fold_index 0 \
+  --dwi_ckpt   /mnt/cvlab/scratch/cvlab/home/hantzhan/code/fomo25-baseline-mae-main/ckpt/dwi.ckpt \
+  --flair_ckpt /mnt/cvlab/scratch/cvlab/home/hantzhan/code/fomo25-baseline-mae-main/ckpt/flair.ckpt \
+  --t1_ckpt    /mnt/cvlab/scratch/cvlab/home/hantzhan/code/fomo25-baseline-mae-main/ckpt/t1.ckpt \
+  --t2_ckpt    /mnt/cvlab/scratch/cvlab/home/hantzhan/code/fomo25-baseline-mae-main/ckpt/t2.ckpt \
+  --early_stop_patience 12 --early_stop_min_delta 0.002 \
+  --freeze_encoder_epochs 15 \
+  --phase1_head_lr 5e-4 --phase2_head_lr 2e-4 --phase2_encoder_lr 1e-5 \
+  --epochs 120 --batch_size 1 --patch_size 24 --precision 16-mixed \
+  --num_devices 1 --num_workers 8 --new_version
+```
+
+Notes:
+- Task 1/3: ignore segmentation masks. Task 2 (segmentation) will use masks and different heads/metrics (DSC, NSD). The fusion encoder and flags remain consistent.
+
 ### Task 3 (Brain Age Regression) – Fusion Finetune
 - Canonical modalities: `("T1", "T2")`
 - Mapping: `T1→t1`, `T2→t2`
@@ -203,5 +266,43 @@
 - Fusion dataset: `src/data/dataset_fusion.py`
 - Preprocessing (fusion): `src/data/preprocess/fomo1_fusion.py`
 - Task config: `src/data/task_configs.py`
+
+
+## Finetune implementation status (Task 1) and roadmap
+
+### What we built
+- **Data**
+  - Fusion-style preprocessing: `Task001_FOMO1_fusion/<subject>/{DWI.npy,ADC.npy,T2FLAIR.npy,SWI_OR_T2STAR.npy,mask.json,label.txt}`.
+  - `FusionCLSDataset` loads per-subject folders, stacks modalities, supports Yucca DataModule args.
+  - Fusion selection via `--fusion_mode {fusion, stacked, auto}`; in fusion mode, splits are built from subject folders.
+
+- **Model**
+  - Multi-encoder wrapper with Masked Mean Fusion across scales; per-global-group `gamma` sized to `len(global_vocab)`.
+  - Default `unet_xl`; heads use `nn.LazyLinear`.
+  - Mapping (FOMO1 → global groups): DWI/ADC→dwi, T2FLAIR→flair, SWI_OR_T2STAR→other.
+
+- **Weights**
+  - Fusion: per-group ckpts `--t1_ckpt, --t2_ckpt, --flair_ckpt, --dwi_ckpt, --other_ckpt` or `--modality_ckpts` (no `all`). Missing groups init randomly; no fallback.
+  - Stacked: single `--all_ckpt` or `--pretrained_weights_path`.
+
+- **Training/runtime**
+  - Subject-level AUROC: aggregates logits by subject and logs `val/auroc_subject`.
+  - CUDA safety: `--precision 16-mixed`, small `--batch_size` (1–2), `--patch_size` 24–32.
+  - Fusion-aware, deterministic split discovery; K-fold controls `--k_folds`, `--fold_index`.
+  - Early stopping/ModelCheckpoint monitor `val/auroc_subject` (binary task) with patience/min_delta.
+  - Two-phase schedule: freeze encoders (head LR 5e-4) then unfreeze (encoder LR 1e-5, head LR 2e-4).
+
+- **Docs/tests**
+  - This guide updated; unit tests cover fusion math, weight remap, dataset collation, multi-encoder forward, and subject-level AUROC aggregation.
+
+### Recommended next improvements
+- **Optimization/stability**: EMA of weights; SWA; grad accumulation; grad clipping; channels-last; optional grad checkpointing.
+- **Evaluation/robustness**: 3-fold ensemble (avg probabilities); temperature scaling for calibration; light TTA if already available.
+- **Scheduling/policy**: optional layer-wise LR decay; cosine restarts/one-cycle; early-stop smoothing.
+- **Data/augmentation**: modality dropout; mild intensity/contrast per-modality; conservative geometric jitter.
+- **Loss/imbalance**: weighted BCE or focal loss; label smoothing in head-only phase.
+- **Metrics/logging**: per-subject CSV each epoch; calibration (ECE/Brier); confusion at operating point.
+- **Inference**: lightweight k-fold ensemble or EMA-only model; export a simple inference script for fusion folders.
+- **Research**: learnable null token; regularize gamma; distill ensemble → single model.
 
 

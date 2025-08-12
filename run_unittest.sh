@@ -1,0 +1,1 @@
+PYTHONPATH=src python -m unittest -v src/tests/test_fusion_masked_mean.py src/tests/test_weight_key_remap.py src/tests/test_dataset_collation.py src/tests/test_finetune_multiencoder.py 2>&1 | tee test.txt

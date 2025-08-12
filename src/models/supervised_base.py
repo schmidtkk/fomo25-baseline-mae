@@ -146,8 +146,38 @@ class BaseSupervisedModel(L.LightningModule):
         # Set up task-specific loss functions
         self.loss_fn_train, self.loss_fn_val = self._configure_losses()
 
+        # Two-phase finetune support: optionally freeze encoders
+        freeze_epochs = int(self.config.get("freeze_encoder_epochs", 0))
+        phase1_head_lr = float(self.config.get("phase1_head_lr", self.learning_rate))
+        phase2_head_lr = float(self.config.get("phase2_head_lr", self.learning_rate))
+        phase2_encoder_lr = float(self.config.get("phase2_encoder_lr", self.learning_rate))
+
+        # Parameter groups: identify encoder vs head
+        encoder_params = []
+        head_params = []
+        for name, p in self.model.named_parameters():
+            if not p.requires_grad:
+                continue
+            if ".encoders." in name or name.startswith("encoder"):
+                encoder_params.append(p)
+            else:
+                head_params.append(p)
+
+        # Initial LR: freeze encoders if requested
+        if freeze_epochs > 0 and len(encoder_params) > 0:
+            for p in encoder_params:
+                p.requires_grad = False
+            param_groups = [
+                {"params": head_params, "lr": phase1_head_lr},
+            ]
+        else:
+            param_groups = [
+                {"params": encoder_params, "lr": phase2_encoder_lr},
+                {"params": head_params, "lr": phase2_head_lr},
+            ]
+
         self.optim = AdamW(
-            self.model.parameters(),
+            param_groups,
             lr=self.learning_rate,
             weight_decay=self.weight_decay,
             amsgrad=self.amsgrad,
@@ -160,8 +190,38 @@ class BaseSupervisedModel(L.LightningModule):
             self.optim, T_max=int(self.trainer.max_epochs * 1.15), eta_min=1e-9
         )
 
+        # Store freeze schedule in state
+        self._freeze_epochs = freeze_epochs
+        self._warmup_epochs = 5
+
         # Return the optimizer and scheduler - the loss is not returned
         return {"optimizer": self.optim, "lr_scheduler": self.lr_scheduler}
+
+    def on_train_epoch_start(self):
+        # Unfreeze encoders after freeze window
+        if hasattr(self, "_freeze_epochs") and self._freeze_epochs > 0:
+            if self.current_epoch == self._freeze_epochs:
+                for name, p in self.model.named_parameters():
+                    if ".encoders." in name or name.startswith("encoder"):
+                        p.requires_grad = True
+                # Adjust LRs to phase 2
+                phase2_encoder_lr = float(self.config.get("phase2_encoder_lr", self.learning_rate))
+                phase2_head_lr = float(self.config.get("phase2_head_lr", self.learning_rate))
+                # Rebuild param groups with desired LRs
+                encoder_params = []
+                head_params = []
+                for name, p in self.model.named_parameters():
+                    if not p.requires_grad:
+                        continue
+                    if ".encoders." in name or name.startswith("encoder"):
+                        encoder_params.append(p)
+                    else:
+                        head_params.append(p)
+                self.optim.param_groups.clear()
+                if len(encoder_params) > 0:
+                    self.optim.add_param_group({"params": encoder_params, "lr": phase2_encoder_lr})
+                if len(head_params) > 0:
+                    self.optim.add_param_group({"params": head_params, "lr": phase2_head_lr})
 
     def forward(self, inputs):
         """Forward pass through the model"""

@@ -1,4 +1,5 @@
-from typing import Optional
+from typing import Optional, Dict, List
+import os
 import torch
 import torch.nn.functional as F
 from torchmetrics import MetricCollection
@@ -73,6 +74,68 @@ class SupervisedClsModel(BaseSupervisedModel):
         # For classification, we typically use cross-entropy loss
         loss_fn = torch.nn.CrossEntropyLoss()
         return loss_fn, loss_fn
+
+    # ---- Subject-level AUROC aggregation (Task 1) ----
+    def on_validation_epoch_start(self):
+        # subject_id -> [sum_prob_pos, count, target]
+        self._val_subject_aggr: Dict[str, List[float]] = {}
+
+    @staticmethod
+    def _extract_subject_id(path_str: str) -> str:
+        # Use folder name as subject ID (works for fusion); fallback to basename
+        return os.path.basename(path_str.rstrip("/"))
+
+    @staticmethod
+    def _mean_probs_targets_from_aggr(aggr: Dict[str, List[float]]):
+        probs = []
+        targets = []
+        for _, (sum_prob, cnt, tgt) in aggr.items():
+            if cnt > 0:
+                probs.append(sum_prob / cnt)
+                targets.append(tgt)
+        if len(probs) == 0:
+            return None, None
+        return torch.tensor(probs, dtype=torch.float32), torch.tensor(targets, dtype=torch.int64)
+
+    def validation_step(self, batch, _batch_idx):
+        # Run base validation logging (loss + per-sample metrics)
+        super().validation_step(batch, _batch_idx)
+
+        # Additional subject-level aggregation for binary AUROC in Task 1
+        if self.num_classes == 2:
+            inputs, target, file_path = self._process_batch(batch)
+            output = self(inputs)
+            prob = F.softmax(output, dim=1)[:, 1].detach().cpu()
+            target = target.detach().cpu()
+
+            # file_path may be a list/tuple of strings or a single string
+            if isinstance(file_path, (list, tuple)):
+                paths = list(file_path)
+            else:
+                paths = [file_path] * prob.shape[0]
+
+            for i in range(prob.shape[0]):
+                sid = self._extract_subject_id(str(paths[i]))
+                p = float(prob[i].item())
+                t = int(target[i].item())
+                if sid not in self._val_subject_aggr:
+                    self._val_subject_aggr[sid] = [0.0, 0.0, t]
+                self._val_subject_aggr[sid][0] += p
+                self._val_subject_aggr[sid][1] += 1.0
+
+    def on_validation_epoch_end(self):
+        # Compute subject-level AUROC if binary classification
+        if self.num_classes == 2 and hasattr(self, "_val_subject_aggr"):
+            probs, targets = self._mean_probs_targets_from_aggr(self._val_subject_aggr)
+            if probs is not None and targets is not None:
+                # Ensure both classes are present
+                if torch.unique(targets).numel() >= 2:
+                    auroc_metric = AUROC(task="binary")
+                    auroc_val = auroc_metric(probs, targets)
+                    self.log("val/auroc_subject", auroc_val, prog_bar=True, logger=True)
+                else:
+                    # Insufficient class variety; skip AUROC
+                    self.log("val/auroc_subject", torch.nan, prog_bar=True, logger=True)
 
     def _process_batch(self, batch):
         """

@@ -7,6 +7,7 @@ import torch
 import lightning as L
 # import wandb
 from lightning.pytorch.callbacks import ModelCheckpoint
+from lightning.pytorch.callbacks.early_stopping import EarlyStopping
 
 from models.supervised_base import BaseSupervisedModel
 from augmentations.finetune_augmentation_presets import (
@@ -78,7 +79,7 @@ def main():
         default="unet_xl",
         help="Model name defined in models.networks (unet_b, unet_xl, etc.)",
     )
-    parser.add_argument("--precision", type=str, default="bf16-mixed")
+    parser.add_argument("--precision", type=str, default="32-true")
     parser.add_argument("--patch_size", type=int, default=32)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--compile", action="store_true")
@@ -140,6 +141,16 @@ def main():
         required=True,
         help="Task ID (1: FOMO1 classification, 2: FOMO2 classification, 3: FOMO3 regression)",
     )
+    # K-Fold parameters
+    parser.add_argument("--k_folds", type=int, default=1, help="Total number of folds (K). If >1, use K-fold.")
+    parser.add_argument("--fold_index", type=int, default=0, help="Current fold index (0-based).")
+    # Early stopping & schedule
+    parser.add_argument("--early_stop_patience", type=int, default=12)
+    parser.add_argument("--early_stop_min_delta", type=float, default=0.002)
+    parser.add_argument("--freeze_encoder_epochs", type=int, default=15)
+    parser.add_argument("--phase1_head_lr", type=float, default=5e-4)
+    parser.add_argument("--phase2_head_lr", type=float, default=2e-4)
+    parser.add_argument("--phase2_encoder_lr", type=float, default=1e-5)
     # Split Configuration
     parser.add_argument("--split_method", type=str, default="simple_train_val_split")
     parser.add_argument("--split_param", type=str, help="Split parameter", default=0.2)
@@ -220,21 +231,46 @@ def main():
         ]
         assert len(subject_dirs) > 0, f"No subject directories found in fusion dir: {fusion_dir}"
 
-        # Deterministic split
-        rng = torch.Generator().manual_seed(42)
-        indices = torch.randperm(len(subject_dirs), generator=rng).tolist()
-        subject_dirs = [subject_dirs[i] for i in indices]
+        # Read labels for stratification
+        def read_label(subj_dir: str) -> int:
+            path = os.path.join(subj_dir, "label.txt")
+            return int(float(open(path, "r").read().strip()))
 
-        if args.split_method == "simple_train_val_split":
-            frac = float(split_param)
-            n_train = max(1, int(len(subject_dirs) * (1 - frac)))
-            train_list = subject_dirs[:n_train]
-            val_list = subject_dirs[n_train:]
+        labels = [read_label(sd) for sd in subject_dirs]
+
+        import random
+        rnd = random.Random(2025)
+
+        # Stratified split: separate by class, shuffle deterministically, then interleave folds
+        pos = [sd for sd, y in zip(subject_dirs, labels) if y == 1]
+        neg = [sd for sd, y in zip(subject_dirs, labels) if y == 0]
+        rnd.shuffle(pos)
+        rnd.shuffle(neg)
+
+        def make_kfolds(items: list, k: int) -> list[list]:
+            return [items[i::k] for i in range(k)] if k > 0 else [items]
+
+        k = max(1, int(args.k_folds))
+        f = max(0, int(args.fold_index))
+        if k > 1:
+            pos_folds = make_kfolds(pos, k)
+            neg_folds = make_kfolds(neg, k)
+            f = min(f, k - 1)
+            val_list = pos_folds[f] + neg_folds[f]
+            train_list = [x for i in range(k) if i != f for x in (pos_folds[i] + neg_folds[i])]
         else:
-            # Fallback: use 80/20 split
-            n_train = max(1, int(len(subject_dirs) * 0.8))
-            train_list = subject_dirs[:n_train]
-            val_list = subject_dirs[n_train:]
+            # Simple split fallback
+            all_items = pos + neg
+            rnd.shuffle(all_items)
+            if args.split_method == "simple_train_val_split":
+                frac = float(split_param)
+                n_train = max(1, int(len(all_items) * (1 - frac)))
+                train_list = all_items[:n_train]
+                val_list = all_items[n_train:]
+            else:
+                n_train = max(1, int(len(all_items) * 0.8))
+                train_list = all_items[:n_train]
+                val_list = all_items[n_train:]
 
         class SimpleSplitsConfig:
             def __init__(self, train_list, val_list):
@@ -330,14 +366,28 @@ def main():
         "fast_dev_run": args.fast_dev_run,
     }
 
-    # Create checkpoint callback for saving models
+    # Choose monitor metric
+    monitor_metric = "val/loss"
+    monitor_mode = "min"
+    if task_type == "classification" and num_classes == 2:
+        monitor_metric = "val/auroc_subject"
+        monitor_mode = "max"
+
+    # Checkpoint and early stopping callbacks
     checkpoint_callback = ModelCheckpoint(
-        every_n_epochs=10,
+        monitor=monitor_metric,
+        mode=monitor_mode,
         save_top_k=1,
-        filename="last",
+        filename="best",
         enable_version_counter=False,
     )
-    callbacks = [checkpoint_callback]
+    early_stop = EarlyStopping(
+        monitor=monitor_metric,
+        mode=monitor_mode,
+        patience=args.early_stop_patience,
+        min_delta=args.early_stop_min_delta,
+    )
+    callbacks = [checkpoint_callback, early_stop]
 
     # Create logger for metrics
     yucca_logger = YuccaLogger(
@@ -405,10 +455,14 @@ def main():
         finetune_modalities = list(task_cfg["modalities"])  # e.g., FOMO1
         config["multi_encoder_modalities"] = finetune_modalities
         default_mapping = {
+            # FOMO1 canonical
             "DWI": "dwi",
             "ADC": "dwi",
             "T2FLAIR": "flair",
             "SWI_OR_T2STAR": "other",
+            # FOMO3 canonical
+            "T1": "t1",
+            "T2": "t2",
         }
         modality_to_global_group = default_mapping.copy()
         if args.modality_mapping is not None:

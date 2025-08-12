@@ -1,1 +1,10 @@
-PYTHONPATH=src python -m unittest -v src/tests/test_fusion_masked_mean.py src/tests/test_weight_key_remap.py src/tests/test_dataset_collation.py src/tests/test_finetune_multiencoder.py 2>&1 | tee test.txt
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Use default GPU (GPU 0). Comment this out to force CPU-only tests
+export CUDA_VISIBLE_DEVICES="0"
+
+export PYTHONPATH=src
+
+# Auto-discover and run with explicit summary
+python tools/run_unittests.py 2>&1 | tee test.txt

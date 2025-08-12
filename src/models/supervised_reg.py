@@ -1,7 +1,7 @@
 from typing import Optional
 import torch
 from torchmetrics import MetricCollection
-from torchmetrics.regression import MeanSquaredError, MeanAbsoluteError, R2Score
+from torchmetrics.regression import MeanSquaredError, MeanAbsoluteError, R2Score, PearsonCorrCoef
 
 from models.supervised_base import BaseSupervisedModel
 
@@ -50,6 +50,7 @@ class SupervisedRegModel(BaseSupervisedModel):
                 f"{prefix}/mse": MeanSquaredError(),
                 f"{prefix}/mae": MeanAbsoluteError(),
                 f"{prefix}/r2": R2Score(),
+                f"{prefix}/corr": PearsonCorrCoef(),
             }
         )
 

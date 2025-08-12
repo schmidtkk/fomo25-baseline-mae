@@ -33,4 +33,4 @@ class TestModalityFilter(unittest.TestCase):
         self.assertEqual(stats['total_filtered'], 4)
 
 if __name__ == '__main__':
-    unittest.main()
+    pass

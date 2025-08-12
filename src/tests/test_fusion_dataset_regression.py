@@ -2,6 +2,7 @@ import os
 import shutil
 import tempfile
 import unittest
+import torch
 import numpy as np
 
 from data.dataset_fusion import FusionCLSDataset
@@ -33,11 +34,10 @@ class TestFusionDatasetRegression(unittest.TestCase):
         x, y = item["image"], item["label"]
         # Expect [M=2, D, H, W]
         self.assertEqual(tuple(x.shape), (2, 8, 8, 8))
-        # Float label
-        self.assertTrue(np.issubdtype(y.dtype, np.floating))
-
-
-if __name__ == "__main__":
-    unittest.main()
+        # Float label (accept either numpy float dtype or torch floating tensor)
+        if isinstance(y, torch.Tensor):
+            self.assertTrue(torch.is_floating_point(y))
+        else:
+            self.assertTrue(np.issubdtype(y.dtype, np.floating))
 
 

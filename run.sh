@@ -1,9 +1,5 @@
-#!/usr/bin/env bash
+echo "[RUN] Start Finetuning"
 
-MODALITY="${1:-t1}"
+sh run_fomo1_finetune.sh
 
-echo "[RUN] Launching pretraining"
-echo "[RUN] Modality: ${MODALITY}"
-echo "[RUN] Timestamp: $(date)"
-
-sh pretrain.sh "$MODALITY"
+echo "[RUN] Finetuning completed"

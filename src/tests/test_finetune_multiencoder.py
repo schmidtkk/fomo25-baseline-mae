@@ -142,7 +142,5 @@ class TestFinetuneMultiEncoder(unittest.TestCase):
                 self.assertEqual(tuple(logits.shape), (B, config["num_classes"]))
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 

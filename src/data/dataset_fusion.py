@@ -1,6 +1,7 @@
 import os
 import json
 import numpy as np
+import nibabel as nib
 import torch
 from torch.utils.data import Dataset
 from typing import Tuple, Optional, List
@@ -11,18 +12,21 @@ from yucca.modules.data.augmentation.transforms.formatting import NumpyToTorch
 
 
 # Known canonical modality sets per task
-FOMO1_MODALITIES = ["DWI", "ADC", "T2FLAIR", "SWI_OR_T2STAR"]
-FOMO3_MODALITIES = ["T1", "T2"]
+FOMO1_MODALITIES = ["DWI", "ADC", "T2FLAIR", "SWI_OR_T2STAR"]  # Task 1 (classification)
+FOMO2_MODALITIES = ["DWI", "T2FLAIR", "SWI_OR_T2STAR"]          # Task 2 (segmentation)
+FOMO3_MODALITIES = ["T1", "T2"]                                   # Task 3 (regression)
 
 
-class FusionCLSDataset(Dataset):
+class FusionDataset(Dataset):
     """
-    Dataset for finetune fusion pipeline where each subject directory contains per-modality .npy files
-    and an optional mask.json, plus label.txt.
+    Unified fusion dataset for finetune across tasks (classification, regression, segmentation).
 
-    Expects samples as directory paths: <...>/Task001_FOMO1_fusion/FOMO1_<subject_id>
-    Produces data_dict compatible with existing augmentation pipeline: 'image' is stacked [M,D,H,W].
-    Missing modalities are zero-filled; model derives mask from zeros or reads 'mask' if needed.
+    Each subject directory contains per-modality .npy files and task-specific labels:
+    - classification/regression: a scalar `label.txt`
+    - segmentation: a `mask.nii.gz`
+
+    Produces data_dict compatible with the augmentation pipeline: 'image' is stacked [M, D, H, W].
+    Missing modalities are zero-filled.
     """
 
     def __init__(
@@ -36,9 +40,8 @@ class FusionCLSDataset(Dataset):
         **kwargs,
     ) -> None:
         super().__init__()
-        # Supports both classification and regression finetune
-        assert task_type in ("classification", "regression"), (
-            f"Unsupported task_type '{task_type}' for FusionCLSDataset"
+        assert task_type in ("classification", "regression", "segmentation"), (
+            f"Unsupported task_type '{task_type}' for FusionDataset"
         )
         self.samples = samples
         self.patch_size = patch_size
@@ -57,6 +60,13 @@ class FusionCLSDataset(Dataset):
         dtype = float if self.task_type == "regression" else int
         return np.loadtxt(label_path, dtype=dtype)
 
+    def _load_segmentation(self, subject_dir: str) -> np.ndarray:
+        nii = join(subject_dir, "mask.nii.gz")
+        assert os.path.exists(nii), f"Missing segmentation mask: {nii}"
+        seg = nib.load(nii).get_fdata().astype(np.int16)
+        seg = (seg > 0).astype(np.int16)
+        return seg
+
     def _load_mask(self, subject_dir: str) -> Optional[dict]:
         mask_path = join(subject_dir, "mask.json")
         if os.path.exists(mask_path):
@@ -67,15 +77,21 @@ class FusionCLSDataset(Dataset):
     def _resolve_modalities(self, subject_dir: str) -> List[str]:
         """
         Decide which canonical modality set to use for this subject.
-        - If T1/T2 style files are present, use FOMO3 order [T1, T2].
-        - Else, fall back to FOMO1 order [DWI, ADC, T2FLAIR, SWI_OR_T2STAR].
+        Priority:
+        1) If T1/T2 style files are present, use FOMO3 order [T1, T2] (Task 3)
+        2) Else if Task 2 modalities exist, use FOMO2 [DWI, T2FLAIR, SWI_OR_T2STAR]
+        3) Else, fall back to FOMO1 [DWI, ADC, T2FLAIR, SWI_OR_T2STAR]
         """
         has_t1_t2 = any(
             os.path.exists(join(subject_dir, f"{m}.npy")) for m in FOMO3_MODALITIES
         )
         if has_t1_t2:
             return FOMO3_MODALITIES
-        # Default to FOMO1 canonical if present
+        has_fomo2 = any(
+            os.path.exists(join(subject_dir, f"{m}.npy")) for m in FOMO2_MODALITIES
+        )
+        if has_fomo2:
+            return FOMO2_MODALITIES
         has_fomo1 = any(
             os.path.exists(join(subject_dir, f"{m}.npy")) for m in FOMO1_MODALITIES
         )
@@ -83,7 +99,7 @@ class FusionCLSDataset(Dataset):
             return FOMO1_MODALITIES
         raise AssertionError(
             f"No recognized modality files found in {subject_dir}. "
-            f"Expected one or more of: {FOMO3_MODALITIES + FOMO1_MODALITIES}"
+            f"Expected one or more of: {FOMO3_MODALITIES + FOMO2_MODALITIES + FOMO1_MODALITIES}"
         )
 
     def _load_per_modality(self, subject_dir: str) -> Tuple[np.ndarray, List[str]]:
@@ -110,7 +126,10 @@ class FusionCLSDataset(Dataset):
         assert os.path.isdir(subject_dir), f"Expected subject directory, got {subject_dir}"
 
         data, modalities = self._load_per_modality(subject_dir)
-        label = self._load_label(subject_dir)
+        if self.task_type == "segmentation":
+            label = self._load_segmentation(subject_dir)
+        else:
+            label = self._load_label(subject_dir)
 
         data_dict = {
             "file_path": subject_dir,
@@ -119,12 +138,19 @@ class FusionCLSDataset(Dataset):
         }
 
         metadata = {"foreground_locations": []}
-        # Apply crop/pad and transforms
+        # Apply crop/pad and transforms to image only to maintain current pipeline behavior
+        # Note: For segmentation, 'label' is not spatially transformed here to preserve existing behavior.
+        # If joint image+label transforms are required, integrate via augmentation composer.
+        tmp_label = data_dict["label"]
         data_dict["label"] = None
         data_dict = self.croppad(data_dict, metadata)
         if self.composed_transforms is not None:
             data_dict = self.composed_transforms(data_dict)
-        data_dict["label"] = label
+        data_dict["label"] = tmp_label
         return self.to_torch(data_dict)
+
+
+# Backward-compatible aliases
+FusionCLSDataset = FusionDataset
 
 

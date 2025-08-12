@@ -152,29 +152,54 @@ class BaseSupervisedModel(L.LightningModule):
         phase2_head_lr = float(self.config.get("phase2_head_lr", self.learning_rate))
         phase2_encoder_lr = float(self.config.get("phase2_encoder_lr", self.learning_rate))
 
-        # Parameter groups: identify encoder vs head
-        encoder_params = []
+        # Parameter groups: identify encoder vs head (optional layer-wise decay)
+        apply_layerwise = bool(self.config.get("apply_layerwise_lr_decay", False))
+        layerwise_gamma = float(self.config.get("layerwise_lr_decay_gamma", 0.0) or 0.0)
+        encoder_named_params = []
         head_params = []
         for name, p in self.model.named_parameters():
             if not p.requires_grad:
                 continue
             if ".encoders." in name or name.startswith("encoder"):
-                encoder_params.append(p)
+                encoder_named_params.append((name, p))
             else:
                 head_params.append(p)
+        # Default: single encoder group; if layer-wise enabled, create multiple groups with decayed LR
+        param_groups = []
+        if apply_layerwise and len(encoder_named_params) > 0 and layerwise_gamma > 0:
+            # Split into 4 depth groups by name order as a simple heuristic
+            encoder_named_params.sort(key=lambda x: x[0])
+            num = len(encoder_named_params)
+            bins = [encoder_named_params[i * num // 4:(i + 1) * num // 4] for i in range(4)]
+            for depth, params_at_depth in enumerate(bins):
+                if not params_at_depth:
+                    continue
+                lr_mult = (layerwise_gamma ** depth)
+                param_groups.append({"params": [p for _, p in params_at_depth], "lr_mult": lr_mult})
+        else:
+            param_groups.append({"params": [p for _, p in encoder_named_params], "lr_mult": 1.0})
 
         # Initial LR: freeze encoders if requested
-        if freeze_epochs > 0 and len(encoder_params) > 0:
-            for p in encoder_params:
+        encoder_params_flat = [p for _, p in encoder_named_params]
+        if freeze_epochs > 0 and len(encoder_params_flat) > 0:
+            for p in encoder_params_flat:
                 p.requires_grad = False
             param_groups = [
                 {"params": head_params, "lr": phase1_head_lr},
             ]
         else:
-            param_groups = [
-                {"params": encoder_params, "lr": phase2_encoder_lr},
-                {"params": head_params, "lr": phase2_head_lr},
-            ]
+            if len(param_groups) == 1:
+                # Single encoder group
+                param_groups = [
+                    {"params": param_groups[0]["params"], "lr": phase2_encoder_lr},
+                    {"params": head_params, "lr": phase2_head_lr},
+                ]
+            else:
+                # Layer-wise groups with lr multipliers
+                lr_groups = []
+                for g in param_groups:
+                    lr_groups.append({"params": g["params"], "lr": phase2_encoder_lr * float(g.get("lr_mult", 1.0))})
+                param_groups = lr_groups + [{"params": head_params, "lr": phase2_head_lr}]
 
         self.optim = AdamW(
             param_groups,
@@ -185,17 +210,45 @@ class BaseSupervisedModel(L.LightningModule):
             betas=self.betas,
         )
 
-        # Scheduler with early cut-off factor of 1.15
-        self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self.optim, T_max=int(self.trainer.max_epochs * 1.15), eta_min=1e-9
-        )
+        # Scheduler selection
+        scheduler_name = str(self.config.get("scheduler", "cosine"))
+        if scheduler_name == "cosine_restarts":
+            self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                self.optim, T_0=max(1, int(self.trainer.max_epochs / 3)), T_mult=2, eta_min=1e-9
+            )
+        elif scheduler_name == "one_cycle":
+            steps_per_epoch = int(self.config.get("train_batches_per_epoch", 100))
+            max_lr = float(self.config.get("one_cycle_max_lr", self.learning_rate))
+            self.lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                self.optim,
+                max_lr=max_lr,
+                epochs=int(self.trainer.max_epochs),
+                steps_per_epoch=max(1, steps_per_epoch),
+                pct_start=0.3,
+                anneal_strategy="cos",
+                div_factor=25.0,
+                final_div_factor=1e4,
+            )
+        elif scheduler_name == "none":
+            self.lr_scheduler = None
+        else:
+            # CosineAnnealingLR with early cut-off factor
+            self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                self.optim, T_max=int(self.trainer.max_epochs * 1.15), eta_min=1e-9
+            )
 
         # Store freeze schedule in state
         self._freeze_epochs = freeze_epochs
         self._warmup_epochs = 5
 
         # Return the optimizer and scheduler - the loss is not returned
-        return {"optimizer": self.optim, "lr_scheduler": self.lr_scheduler}
+        if self.lr_scheduler is None:
+            return {"optimizer": self.optim}
+        # Lightning can accept a dict or list; pass scheduler with interval configured for OneCycle
+        sched = self.lr_scheduler
+        if isinstance(sched, torch.optim.lr_scheduler.OneCycleLR):
+            return {"optimizer": self.optim, "lr_scheduler": {"scheduler": sched, "interval": "step"}}
+        return {"optimizer": self.optim, "lr_scheduler": sched}
 
     def on_train_epoch_start(self):
         # Unfreeze encoders after freeze window
@@ -307,56 +360,73 @@ class BaseSupervisedModel(L.LightningModule):
         raise NotImplementedError("Subclasses must implement compute_metrics")
 
     def load_state_dict(self, state_dict, *args, **kwargs):
-        """Load state dict with handling for different model architectures"""
-        # First we filter out layers that have changed in size
-        # This is often the case in the output layer.
-        # If we are finetuning on a task with a different number of classes
-        # than the pretraining task, the # output channels will have changed.
+        """Load state dict with robust reporting focused on actually attempted keys.
+
+        - Compute rejections against the provided state dict before filtering
+        - Load only keys present and shape-compatible
+        - Report success/unchanged among the attempted keys (not all model params)
+        """
+        from torch.nn.parameter import UninitializedParameter
+
+        def _safe_same_shape(a, b) -> bool:
+            try:
+                if isinstance(a, UninitializedParameter) or isinstance(b, UninitializedParameter):
+                    return False
+                return hasattr(a, "shape") and hasattr(b, "shape") and a.shape == b.shape
+            except Exception:
+                return False
+
         old_params = copy.deepcopy(self.state_dict())
-        state_dict = {
-            k: v
-            for k, v in state_dict.items()
-            if (k in old_params) and (old_params[k].shape == state_dict[k].shape)
-        }
-        rejected_keys_new = [k for k in state_dict.keys() if k not in old_params]
-        rejected_keys_shape = [
-            k for k in state_dict.keys() if old_params[k].shape != state_dict[k].shape
-        ]
-        rejected_keys_data = []
+        provided = copy.deepcopy(state_dict)
 
-        # Here there's also potential to implement custom loading functions.
-        # E.g. to load 2D pretrained models into 3D by repeating or something like that.
+        # Determine rejects relative to current model params (avoid touching .shape on uninitialized)
+        rejected_keys_new = [k for k in provided.keys() if k not in old_params]
+        rejected_keys_shape = [k for k in provided.keys() if (k in old_params) and (not _safe_same_shape(old_params[k], provided[k]))]
 
-        # Now keep track of the # of layers with succesful weight transfers
-        successful = 0
-        unsuccessful = 0
-        super().load_state_dict(state_dict, *args, **kwargs)
+        # Filter to attempted keys: present and shape-compatible
+        filtered = {k: v for k, v in provided.items() if (k in old_params) and _safe_same_shape(old_params[k], v)}
+
+        # Load
+        super().load_state_dict(filtered, *args, **kwargs)
+
+        # Post-check success for attempted keys only
         new_params = self.state_dict()
-        for param_name, p1, p2 in zip(
-            old_params.keys(), old_params.values(), new_params.values()
-        ):
-            # If more than one param in layer is NE (not equal) to the original weights we've successfully loaded new weights.
-            if p1.data.ne(p2.data).sum() > 0:
-                successful += 1
+        successful_keys = []
+        unchanged_after_load = []
+        for k in filtered.keys():
+            before = old_params[k]
+            after = new_params[k]
+            try:
+                changed = before.data.ne(after.data).sum() > 0
+            except Exception:
+                changed = False
+            if changed:
+                successful_keys.append(k)
             else:
-                unsuccessful += 1
-                if (
-                    param_name not in rejected_keys_new
-                    and param_name not in rejected_keys_shape
-                ):
-                    rejected_keys_data.append(param_name)
+                unchanged_after_load.append(k)
 
-        logging.warn(
-            f"Succesfully transferred weights for {successful}/{successful+unsuccessful} layers"
-        )
-        logging.warn(
-            f"Rejected the following keys:\n"
-            f"Not in old dict: {rejected_keys_new}.\n"
-            f"Wrong shape: {rejected_keys_shape}.\n"
-            f"Post check not succesful: {rejected_keys_data}."
-        )
+        num_attempted = len(filtered)
+        num_successful = len(successful_keys)
+        num_unchanged = len(unchanged_after_load)
 
-        return successful
+        # Logging
+        logging.info(
+            f"Successfully transferred {num_successful}/{num_attempted} compatible layers; "
+            f"{len(rejected_keys_new)} keys not found; {len(rejected_keys_shape)} with mismatched shape."
+        )
+        if rejected_keys_new or rejected_keys_shape:
+            logging.info(
+                "Some keys were rejected (set log level DEBUG to see full lists)."
+            )
+            logging.debug(f"Not in model: {rejected_keys_new}")
+            logging.debug(f"Wrong shape: {rejected_keys_shape}")
+        if num_unchanged > 0:
+            logging.info(
+                f"{num_unchanged} loaded keys did not change values (likely identical to current weights)."
+            )
+            logging.debug(f"Unchanged after load: {unchanged_after_load}")
+
+        return num_successful
 
     @staticmethod
     def create(task_type, config, **kwargs):

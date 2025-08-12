@@ -130,6 +130,73 @@
 - Set total folds and current fold via `--k_folds K` and `--fold_index f` (0-based). Splits are stratified at subject level in fusion mode.
 - Validation logs a subject-level AUROC (`val/auroc_subject`) by aggregating per-subject predictions (mean logit) before AUROC.
 
+### K-Fold ensembling (Task 1)
+- Utilities in `src/utils/ensemble.py`:
+  - `average_probabilities([...], weights=None)`: average per-sample probabilities across folds/models.
+  - `average_subject_probabilities([...], weights=None)`: average per-subject positive-class probs across folds.
+  - `auroc_from_subject_probabilities(subject_to_prob, subject_to_target)`: compute AUROC at subject level.
+- CLI helper: `src/utils/ensemble_cli.py` supports ensembling multiple JSON files with schema:
+  ```json
+  {
+    "subject_probs": {"FOMO1_A": 0.73, "FOMO1_B": 0.21},
+    "subject_targets": {"FOMO1_A": 1, "FOMO1_B": 0}
+  }
+  ```
+  Example:
+  ```bash
+  PYTHONPATH=src python src/utils/ensemble_cli.py \
+    --inputs runs/fomo1_k3/fold0/.../subject_probs/val_subject_probs_epoch_0012.json \
+            runs/fomo1_k3/fold1/.../subject_probs/val_subject_probs_epoch_0010.json \
+            runs/fomo1_k3/fold2/.../subject_probs/val_subject_probs_epoch_0011.json \
+    --out runs/fomo1_k3/ensemble_subject_probs.json
+  ```
+  It writes the averaged `subject_probs` and prints AUROC if `subject_targets` are present.
+- Cross-validation summary tool: `tools/summarize_kfold.py` automatically locates the latest `subject_probs` JSON per fold and reports per-fold AUROC and ensembled AUROC.
+  ```bash
+  PYTHONPATH=src python tools/summarize_kfold.py runs/fomo1_k3 --num_folds 3 --print_paths
+  ```
+
+### Subject-level export and optimization options
+- Subject-level JSON export (for ensembling/analysis): enable via `--export_subject_probs`. Files are written under `version_dir/subject_probs/` each validation epoch with schema:
+```json
+{
+  "subject_probs": {"FOMO1_A": 0.73, "FOMO1_B": 0.21},
+  "subject_targets": {"FOMO1_A": 1, "FOMO1_B": 0},
+  "epoch": 12
+}
+```
+- Training stability flags in `src/finetune.py`:
+  - `--accumulate_grad_batches N`
+  - `--grad_clip_val V`
+  - `--channels_last`
+  - `--use_swa --swa_lrs LR`
+  - `--use_ema --ema_decay 0.999`
+    - EMA swaps into validation automatically and the best EMA checkpoint is saved as `ema-best.ckpt` under `.../checkpoints/`.
+  - Schedulers and LR policy (optional, defaults off or cosine):
+    - `--scheduler {cosine, cosine_restarts, one_cycle, none}`; `--one_cycle_max_lr`.
+    - Layer-wise LR decay: `--apply_layerwise_lr_decay`, `--layerwise_lr_decay_gamma`.
+- Validation TTA:
+  - `--val_tta` enables a light placeholder TTA path. For full TTA, integrate input flips in forward.
+- Per-subject CSV export:
+  - Alongside JSON, a CSV is written per epoch to `version_dir/subject_probs/val_subject_probs_epoch_XXXX.csv`.
+  - Writer utility: `src/utils/logging_utils.py`.
+
+### Calibration
+- Module: `src/utils/calibration.py`
+- `TemperatureScaler`: fits a single temperature on validation probs/targets using NLL; provides:
+  - `fit_from_probs(probs, targets)` → learned temperature
+  - `forward_probs(probs)` → calibrated probabilities
+  - `brier_score(probs, targets)`
+- Unit test: `src/tests/test_calibration.py`.
+
+### Loss and imbalance options (classification)
+- Module: `src/utils/losses.py`
+- Flags via model `config` (set in `finetune.py` before model creation):
+  - `class_weights`: list of per-class weights (e.g., `[w_neg, w_pos]` for binary) used for CE or to derive `pos_weight` for BCE.
+  - `focal_gamma` and optional `focal_alpha`: enable focal loss (binary or multiclass).
+  - `label_smoothing`: applied to training CE for multiclass; validation uses 0 smoothing.
+- Tests: `src/tests/test_losses.py`.
+
 ## New features (Task 1 finetune)
 
 - Fusion vs stacked switch
@@ -165,9 +232,13 @@
   - Cosine scheduler with 5-epoch warmup to 0.1× by end of training (matches repo default style).
 
 - Runtime safety and memory
+
+- K-Fold ensemble utilities
+  - `src/utils/ensemble.py` implements probability and subject-level ensembling.
+  - `src/utils/ensemble_cli.py` provides a minimal CLI to ensemble per-fold subject probabilities.
   - Use `--precision 16-mixed`, `--batch_size 1–2`, and `--patch_size 24–32` (divisible by 8). If still limited, try `--model_name unet_b`.
 
-### Example: Task 1 finetune with fusion, K-fold, AUROC, and 2-phase schedule
+### Example: Task 1 finetune with fusion, K-fold, EMA, subject export
 ```bash
 PY=/mnt/cvlab/scratch/cvlab/home/hantzhan/anaconda3/envs/fomo/bin/python
 cd /mnt/cvlab/scratch/cvlab/home/hantzhan/code/fomo25-baseline-mae-main
@@ -215,8 +286,29 @@ Notes:
     --t2_ckpt /abs/path/to/t2.ckpt \
     --epochs 200 --batch_size 2 --num_devices 1 --num_workers 8 --new_version
   ```
-  - Metrics: MAE, MSE, R2 are logged by default. Add Pearson r if desired.
+- Metrics: MAE, MSE, R2, Pearson correlation are logged by default.
   - Precision: for maximal stability, prefer full precision: `--precision 32-true`.
+
+### Task 2 (Meningioma Segmentation) – Fusion Finetune
+- Canonical modalities: `("DWI", "T2FLAIR", "SWI_OR_T2STAR")`
+- Label: binary tumor mask per subject (`mask.nii.gz`)
+- Config: `task2_config` now sets `task_type="segmentation"`, `num_classes=2`, `label_extension=".nii.gz"`.
+- Dataset: unified `src/data/dataset_fusion.py` (`FusionDataset`) handles classification, regression, and segmentation.
+- Preprocessing: `src/data/preprocess/fomo2_fusion.py` builds per-subject folders at `<data_dir>/Task002_FOMO2_fusion/<FOMO2_...>/{DWI.npy,T2FLAIR.npy,SWI_OR_T2STAR.npy,mask.json,mask.nii.gz}` from raw `preprocessed/` and `labels/seg.nii.gz`.
+- Metrics: Dice and F1 reported by `SupervisedSegModel`. For evaluation exports, `src/evaluator.py` supports surface metrics (Average Surface Distance). NSD can be integrated via yucca surface metrics if required by enabling surface eval.
+- Example:
+```bash
+PY=/path/to/python
+cd /path/to/repo
+PYTHONPATH=src "$PY" src/finetune.py \
+  --taskid 2 \
+  --data_dir /path/to/fomo-finetune \
+  --save_dir ./runs \
+  --model_name unet_xl \
+  --fusion_mode fusion \
+  --epochs 120 --batch_size 1 --patch_size 24 --precision 16-mixed \
+  --num_devices 1 --num_workers 8 --new_version
+```
 
 ## Tests
 - Fusion correctness: `src/tests/test_fusion_masked_mean.py`
@@ -268,9 +360,9 @@ Notes:
 - Task config: `src/data/task_configs.py`
 
 
-## Finetune implementation status (Task 1) and roadmap
+## Finetune implementation status (Task 1)
 
-### What we built
+### Highlights
 - **Data**
   - Fusion-style preprocessing: `Task001_FOMO1_fusion/<subject>/{DWI.npy,ADC.npy,T2FLAIR.npy,SWI_OR_T2STAR.npy,mask.json,label.txt}`.
   - `FusionCLSDataset` loads per-subject folders, stacks modalities, supports Yucca DataModule args.
@@ -287,22 +379,27 @@ Notes:
 
 - **Training/runtime**
   - Subject-level AUROC: aggregates logits by subject and logs `val/auroc_subject`.
+  - Subject-level export: JSON + CSV each validation epoch with `--export_subject_probs`.
   - CUDA safety: `--precision 16-mixed`, small `--batch_size` (1–2), `--patch_size` 24–32.
   - Fusion-aware, deterministic split discovery; K-fold controls `--k_folds`, `--fold_index`.
   - Early stopping/ModelCheckpoint monitor `val/auroc_subject` (binary task) with patience/min_delta.
   - Two-phase schedule: freeze encoders (head LR 5e-4) then unfreeze (encoder LR 1e-5, head LR 2e-4).
+  - Stability options: grad accumulation/clipping, channels-last, SWA, EMA (`--use_ema`).
 
 - **Docs/tests**
   - This guide updated; unit tests cover fusion math, weight remap, dataset collation, multi-encoder forward, and subject-level AUROC aggregation.
 
-### Recommended next improvements
-- **Optimization/stability**: EMA of weights; SWA; grad accumulation; grad clipping; channels-last; optional grad checkpointing.
-- **Evaluation/robustness**: 3-fold ensemble (avg probabilities); temperature scaling for calibration; light TTA if already available.
-- **Scheduling/policy**: optional layer-wise LR decay; cosine restarts/one-cycle; early-stop smoothing.
-- **Data/augmentation**: modality dropout; mild intensity/contrast per-modality; conservative geometric jitter.
-- **Loss/imbalance**: weighted BCE or focal loss; label smoothing in head-only phase.
-- **Metrics/logging**: per-subject CSV each epoch; calibration (ECE/Brier); confusion at operating point.
-- **Inference**: lightweight k-fold ensemble or EMA-only model; export a simple inference script for fusion folders.
-- **Research**: learnable null token; regularize gamma; distill ensemble → single model.
+### Current
+- Fusion finetune path implemented end-to-end:
+  - Fusion dataset and preprocessing; `FusionCLSDataset` integrated with Yucca DataModule.
+  - `--fusion_mode` switch (fusion/stacked/auto); per-group ckpt flags; no `all` fallback in fusion.
+  - Stratified subject-level K-fold: `--k_folds`, `--fold_index`.
+  - Subject-level AUROC (`val/auroc_subject`) with EarlyStopping and best-checkpoint monitoring.
+  - Two-phase finetune (freeze encoders, then unfreeze with separate LRs).
+- EMA enabled and saved: validation swaps to EMA; best EMA checkpoint saved as `ema-best.ckpt`.
+- Ensembling support:
+  - Utilities and CLI for subject-wise ensembling; `tools/summarize_kfold.py` to report per-fold and ensembled AUROC.
+- Calibration support: `TemperatureScaler` utilities.
+- Subject-level export and CSV; optional validation TTA flag.
 
 

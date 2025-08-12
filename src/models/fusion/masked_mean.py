@@ -60,6 +60,15 @@ class MaskedMeanFusion3D(nn.Module):
             aligned.append(f)
 
         Fstack = torch.stack(aligned, dim=1)  # [B,M,C,D,H,W]
+        # Ensure mask length matches modality count M
+        if mask.dim() == 1:
+            mask = mask.view(1, -1).expand(B, -1)
+        if mask.shape[1] != M:
+            if mask.shape[1] < M:
+                pad = torch.zeros(B, M - mask.shape[1], dtype=mask.dtype, device=mask.device)
+                mask = torch.cat([mask, pad], dim=1)
+            else:
+                mask = mask[:, :M]
         m = mask.view(B, M, 1, 1, 1, 1).type_as(Fstack)
         Fstack = Fstack * m
 

@@ -8,6 +8,11 @@ import lightning as L
 # import wandb
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.callbacks.early_stopping import EarlyStopping
+from utils.callbacks import ModelEMACallback
+try:
+    from lightning.pytorch.callbacks import StochasticWeightAveraging
+except Exception:
+    StochasticWeightAveraging = None
 
 from models.supervised_base import BaseSupervisedModel
 from augmentations.finetune_augmentation_presets import (
@@ -36,7 +41,6 @@ from data.dataset import CLSDataset
 from data.dataset_fusion import FusionCLSDataset
 from data.task_configs import task1_config, task2_config, task3_config, hbn_config
 from torch.utils.data import SequentialSampler
-
 
 def get_task_config(taskid):
     if taskid == 1:
@@ -151,6 +155,44 @@ def main():
     parser.add_argument("--phase1_head_lr", type=float, default=5e-4)
     parser.add_argument("--phase2_head_lr", type=float, default=2e-4)
     parser.add_argument("--phase2_encoder_lr", type=float, default=1e-5)
+    # Optimization/stability options
+    parser.add_argument("--accumulate_grad_batches", type=int, default=1,
+                        help="Accumulate gradients for this many steps before optimizer step")
+    parser.add_argument("--grad_clip_val", type=float, default=0.0,
+                        help="If >0, clip gradient norm to this value")
+    parser.add_argument("--channels_last", action="store_true",
+                        help="Use channels-last memory format for model parameters")
+    parser.add_argument("--use_swa", action="store_true",
+                        help="Enable Stochastic Weight Averaging (SWA) callback")
+    parser.add_argument("--swa_lrs", type=float, default=1e-4,
+                        help="SWA learning rate used by the SWA callback if enabled")
+    # Subject-level export
+    parser.add_argument("--export_subject_probs", action="store_true",
+                        help="Export per-subject probabilities/targets as JSON each validation epoch")
+    parser.add_argument("--val_tta", action="store_true",
+                        help="Enable light test-time augmentation during validation for classification")
+    # Scheduling & LR policy (optional; defaults are off or cosine)
+    parser.add_argument("--scheduler", type=str, default="cosine",
+                        choices=["cosine", "cosine_restarts", "one_cycle", "none"],
+                        help="Learning rate scheduler policy")
+    parser.add_argument("--one_cycle_max_lr", type=float, default=None,
+                        help="Max LR for one-cycle scheduler (defaults to learning_rate if None)")
+    parser.add_argument("--apply_layerwise_lr_decay", action="store_true",
+                        help="Enable simple layer-wise LR decay on encoder params")
+    parser.add_argument("--layerwise_lr_decay_gamma", type=float, default=0.0,
+                        help="Decay factor per depth bin (e.g., 0.8)")
+    # Loss options
+    parser.add_argument("--class_weights", type=str, default=None,
+                        help="Comma-separated class weights, e.g., '1.0,2.0' for binary")
+    parser.add_argument("--focal_gamma", type=float, default=None,
+                        help="Enable focal loss with this gamma (binary or multiclass)")
+    parser.add_argument("--focal_alpha", type=float, default=None,
+                        help="Alpha for binary focal loss (default 0.25 if not set)")
+    parser.add_argument("--label_smoothing", type=float, default=0.0,
+                        help="Label smoothing for multiclass CE in training")
+    # EMA
+    parser.add_argument("--use_ema", action="store_true", help="Enable EMA of model parameters")
+    parser.add_argument("--ema_decay", type=float, default=0.999, help="EMA decay in (0,1)")
     # Split Configuration
     parser.add_argument("--split_method", type=str, default="simple_train_val_split")
     parser.add_argument("--split_param", type=str, help="Split parameter", default=0.2)
@@ -188,6 +230,12 @@ def main():
     train_data_dir = os.path.join(data_dir, task_name)
     # If fusion dataset requested/exists, use it consistently for split discovery and loading
     fusion_dir = os.path.join(data_dir, f"{task_name}_fusion")
+    # Also support passing task-specific path (e.g., .../fomo-task2). In that case, fusion lives one level up.
+    if not os.path.isdir(fusion_dir):
+        parent_dir = os.path.dirname(data_dir)
+        candidate = os.path.join(parent_dir, f"{task_name}_fusion")
+        if os.path.isdir(candidate):
+            fusion_dir = candidate
     if args.fusion_mode == "fusion":
         use_fusion = True
     elif args.fusion_mode == "stacked":
@@ -231,46 +279,60 @@ def main():
         ]
         assert len(subject_dirs) > 0, f"No subject directories found in fusion dir: {fusion_dir}"
 
-        # Read labels for stratification
-        def read_label(subj_dir: str) -> int:
-            path = os.path.join(subj_dir, "label.txt")
-            return int(float(open(path, "r").read().strip()))
-
-        labels = [read_label(sd) for sd in subject_dirs]
-
         import random
         rnd = random.Random(2025)
-
-        # Stratified split: separate by class, shuffle deterministically, then interleave folds
-        pos = [sd for sd, y in zip(subject_dirs, labels) if y == 1]
-        neg = [sd for sd, y in zip(subject_dirs, labels) if y == 0]
-        rnd.shuffle(pos)
-        rnd.shuffle(neg)
 
         def make_kfolds(items: list, k: int) -> list[list]:
             return [items[i::k] for i in range(k)] if k > 0 else [items]
 
         k = max(1, int(args.k_folds))
         f = max(0, int(args.fold_index))
-        if k > 1:
-            pos_folds = make_kfolds(pos, k)
-            neg_folds = make_kfolds(neg, k)
-            f = min(f, k - 1)
-            val_list = pos_folds[f] + neg_folds[f]
-            train_list = [x for i in range(k) if i != f for x in (pos_folds[i] + neg_folds[i])]
-        else:
-            # Simple split fallback
-            all_items = pos + neg
-            rnd.shuffle(all_items)
-            if args.split_method == "simple_train_val_split":
-                frac = float(split_param)
-                n_train = max(1, int(len(all_items) * (1 - frac)))
-                train_list = all_items[:n_train]
-                val_list = all_items[n_train:]
+
+        if task_type == "classification":
+            def read_label(subj_dir: str) -> int:
+                path = os.path.join(subj_dir, "label.txt")
+                return int(float(open(path, "r").read().strip()))
+            labels_cls = [read_label(sd) for sd in subject_dirs]
+            pos = [sd for sd, y in zip(subject_dirs, labels_cls) if y == 1]
+            neg = [sd for sd, y in zip(subject_dirs, labels_cls) if y == 0]
+            rnd.shuffle(pos)
+            rnd.shuffle(neg)
+            if k > 1:
+                pos_folds = make_kfolds(pos, k)
+                neg_folds = make_kfolds(neg, k)
+                f = min(f, k - 1)
+                val_list = pos_folds[f] + neg_folds[f]
+                train_list = [x for i in range(k) if i != f for x in (pos_folds[i] + neg_folds[i])]
             else:
-                n_train = max(1, int(len(all_items) * 0.8))
-                train_list = all_items[:n_train]
-                val_list = all_items[n_train:]
+                all_items = pos + neg
+                rnd.shuffle(all_items)
+                if args.split_method == "simple_train_val_split":
+                    frac = float(split_param)
+                    n_train = max(1, int(len(all_items) * (1 - frac)))
+                    train_list = all_items[:n_train]
+                    val_list = all_items[n_train:]
+                else:
+                    n_train = max(1, int(len(all_items) * 0.8))
+                    train_list = all_items[:n_train]
+                    val_list = all_items[n_train:]
+        else:
+            all_items = list(subject_dirs)
+            rnd.shuffle(all_items)
+            if k > 1:
+                folds = make_kfolds(all_items, k)
+                f = min(f, k - 1)
+                val_list = folds[f]
+                train_list = [x for i in range(k) if i != f for x in folds[i]]
+            else:
+                if args.split_method == "simple_train_val_split":
+                    frac = float(split_param)
+                    n_train = max(1, int(len(all_items) * (1 - frac)))
+                    train_list = all_items[:n_train]
+                    val_list = all_items[n_train:]
+                else:
+                    n_train = max(1, int(len(all_items) * 0.8))
+                    train_list = all_items[:n_train]
+                    val_list = all_items[n_train:]
 
         class SimpleSplitsConfig:
             def __init__(self, train_list, val_list):
@@ -364,6 +426,20 @@ def main():
         
         # Trainer specific params
         "fast_dev_run": args.fast_dev_run,
+        # Subject-level export
+        "export_subject_probs": args.export_subject_probs,
+        # Validation-time TTA
+        "val_tta": args.val_tta,
+        # Scheduling & LR policy
+        "scheduler": args.scheduler,
+        "one_cycle_max_lr": args.one_cycle_max_lr if args.one_cycle_max_lr is not None else args.learning_rate,
+        "apply_layerwise_lr_decay": args.apply_layerwise_lr_decay,
+        "layerwise_lr_decay_gamma": args.layerwise_lr_decay_gamma,
+        # Loss options
+        "class_weights": [float(x) for x in args.class_weights.split(",")] if args.class_weights else None,
+        "focal_gamma": args.focal_gamma,
+        "focal_alpha": args.focal_alpha,
+        "label_smoothing": args.label_smoothing,
     }
 
     # Choose monitor metric
@@ -372,9 +448,18 @@ def main():
     if task_type == "classification" and num_classes == 2:
         monitor_metric = "val/auroc_subject"
         monitor_mode = "max"
+    elif task_type == "regression":
+        # Prefer Absolute Error (MAE) for brain age regression
+        monitor_metric = "val/mae"
+        monitor_mode = "min"
+    elif task_type == "segmentation":
+        # Track dice for foreground (class 1) if available
+        monitor_metric = "val/dice_1"
+        monitor_mode = "max"
 
     # Checkpoint and early stopping callbacks
     checkpoint_callback = ModelCheckpoint(
+        dirpath=os.path.join(version_dir, "checkpoints"),
         monitor=monitor_metric,
         mode=monitor_mode,
         save_top_k=1,
@@ -388,6 +473,18 @@ def main():
         min_delta=args.early_stop_min_delta,
     )
     callbacks = [checkpoint_callback, early_stop]
+    if args.use_swa and StochasticWeightAveraging is not None:
+        callbacks.append(StochasticWeightAveraging(swa_lrs=float(args.swa_lrs)))
+    if args.use_ema:
+        callbacks.append(
+            ModelEMACallback(
+                decay=float(args.ema_decay),
+                save_ema_best=True,
+                monitor=monitor_metric,
+                mode=monitor_mode,
+                filename="ema-best",
+            )
+        )
 
     # Create logger for metrics
     yucca_logger = YuccaLogger(
@@ -408,8 +505,11 @@ def main():
     )
 
     # Create the data module that handles loading and batching
-    # Choose dataset class: FusionCLSDataset if folder-style fusion preprocessing detected
-    dataset_cls = FusionCLSDataset if use_fusion else CLSDataset
+    # Choose dataset class by task and fusion
+    if use_fusion:
+        dataset_cls = FusionCLSDataset
+    else:
+        dataset_cls = CLSDataset
 
     data_module = YuccaDataModule(
         train_dataset_class=dataset_cls,  # Supports both stacked and per-modality fusion
@@ -485,17 +585,23 @@ def main():
         compile_mode="default" if args.compile_mode is None else args.compile_mode,
     )
 
+    # Optional channels-last memory format
+    if args.channels_last:
+        model = model.to(memory_format=torch.channels_last)
+
     # Create Lightning trainer
     trainer = L.Trainer(
         callbacks=callbacks,
         logger=loggers,
-        accelerator="auto" if torch.cuda.is_available() else "cpu",
+        accelerator="gpu" if torch.cuda.is_available() else "cpu",
         strategy="auto",
         num_nodes=1,
         devices=args.num_devices,
         default_root_dir=save_dir,
         max_epochs=args.epochs,
         limit_train_batches=args.train_batches_per_epoch,
+        accumulate_grad_batches=max(1, int(args.accumulate_grad_batches)),
+        gradient_clip_val=float(args.grad_clip_val) if args.grad_clip_val and args.grad_clip_val > 0 else 0.0,
         precision=args.precision,
         fast_dev_run=args.fast_dev_run,
     )
@@ -514,6 +620,7 @@ def main():
         if not use_fusion:
             # Single-encoder (stacked) path: use --all_ckpt (preferred) or --pretrained_weights_path
             single_ckpt = args.all_ckpt if args.all_ckpt is not None else args.pretrained_weights_path
+            print(f"[CKPT] Loading single-encoder checkpoint: {single_ckpt}")
             state_dict = load_pretrained_weights(single_ckpt, args.compile)
             state_dict = state_dict['state_dict']
             num_successful_weights_transferred = model.load_state_dict(state_dict=state_dict, strict=False)
@@ -544,6 +651,14 @@ def main():
 
             mapping = config.get("modality_to_global_group", {})
 
+            # Debug: print loading plan
+            print("[CKPT] Modality->Group mapping:")
+            for m, g in mapping.items():
+                print(f"  - {m} -> {g}")
+            print("[CKPT] Group checkpoints:")
+            for g, p in ckpt_map.items():
+                print(f"  - {g}: {p}")
+
             merged_state = {}
             finetune_modalities = config.get("multi_encoder_modalities", [])
             for i, mod in enumerate(finetune_modalities):
@@ -553,8 +668,9 @@ def main():
                     continue
                 src_ckpt = ckpt_map.get(group, None)
                 if src_ckpt is None:
-                    print(f"Warning: No checkpoint provided for group '{group}'. {mod} will use random init.")
+                    print(f"[CKPT] Missing checkpoint for group '{group}' -> modality '{mod}' will use random init.")
                     continue
+                print(f"[CKPT] Loading encoder for modality '{mod}' (group='{group}') from: {src_ckpt}")
                 sd = load_pretrained_weights(src_ckpt, args.compile)["state_dict"]
                 for k, v in sd.items():
                     if not k.startswith("model.encoder."):
@@ -566,6 +682,7 @@ def main():
             num_successful_weights_transferred = model.load_state_dict(
                 state_dict=merged_state, strict=False
             )
+            print(f"[CKPT] Successfully transferred per-encoder weights for {num_successful_weights_transferred} keys (see logs for details)")
         if num_successful_weights_transferred == 0:
             print("Warning: No weights were successfully transferred; proceeding with random init.")
     else:

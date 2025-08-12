@@ -90,7 +90,16 @@ class MultiModalEncoderWithFusion(nn.Module):
         """
         assert x.dim() == 5, f"Expected 5D tensor, got {x.shape}"
         B, M, D, H, W = x.shape
-        assert M == self.num_modalities, f"Expected {self.num_modalities} modalities but got {M}"
+        if M != self.num_modalities:
+            # If fewer channels provided (e.g., ADC missing), pad missing with zeros in canonical order
+            # This assumes inputs are ordered to match self.modality_names subset
+            out = {}
+            for i, name in enumerate(self.modality_names):
+                if i < M:
+                    out[name] = x[:, i : i + 1]
+                else:
+                    out[name] = torch.zeros((B, 1, D, H, W), dtype=x.dtype, device=x.device)
+            return out
         return {name: x[:, i : i + 1] for i, name in enumerate(self.modality_names)}
 
     def forward(

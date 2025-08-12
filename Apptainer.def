@@ -1,0 +1,40 @@
+Bootstrap: docker
+From: python:3.11-slim
+
+%labels
+    Author FOMO25 Challenge
+    Version v1.0.0
+    Description FOMO25 Apptainer Image (Task 1)
+
+%environment
+    export PYTHONUNBUFFERED=1
+    export LC_ALL=C.UTF-8
+    export PYTHONPATH=/workspace/src
+
+%files
+    # Code and lightweight requirements
+    ./src /workspace/src
+    ./app/predict.py /app/predict.py
+    ./src/inference/container_requirements.txt /app/requirements.txt
+
+%post
+    # Create necessary directories
+    mkdir -p /input /output /app /workspace
+
+    # System deps
+    apt-get update && apt-get install -y --no-install-recommends \
+        build-essential git \
+        && rm -rf /var/lib/apt/lists/*
+
+    # Python deps
+    pip install --no-cache-dir -U pip setuptools wheel
+    if [ -f /app/requirements.txt ]; then pip install --no-cache-dir -r /app/requirements.txt; fi
+    # Minimal core deps if requirements missing
+    pip install --no-cache-dir nibabel numpy lightning==2.5.2 torchmetrics==1.4.0 || true
+
+    chmod +x /app/predict.py
+
+%runscript
+    exec python /app/predict.py "$@"
+
+

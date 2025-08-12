@@ -43,7 +43,5 @@ class TestDatasetCollation(unittest.TestCase):
         self.assertTrue(torch.allclose(mask, torch.tensor([[1, 0, 1, 1], [1, 1, 1, 0]], dtype=torch.float32)))
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 

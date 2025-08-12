@@ -17,13 +17,15 @@ task2_config = {
     "task_name": "Task002_FOMO2",
     "crop_to_nonzero": True,
     "deep_supervision": False,
+    # Sequences: T2 FLAIR, DWI(b1000), and either T2* or SWI
     "modalities": ("DWI", "T2FLAIR", "SWI_OR_T2STAR"),
     "norm_op": "volume_wise_znorm",
     "num_classes": 2,
     "keep_aspect_ratio": True,
-    "task_type": "classification",
-    "label_extension": ".txt",
-    "labels": {0: "background", 1: "menigioma"},
+    "task_type": "segmentation",
+    # For fusion finetune, segmentation mask is provided per case
+    "label_extension": ".nii.gz",
+    "labels": {0: "background", 1: "meningioma"},
 }
 
 task3_config = {

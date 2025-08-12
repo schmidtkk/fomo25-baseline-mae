@@ -117,6 +117,16 @@ def main():
     assert args.patch_size % 8 == 0, args.patch_size
     assert args.mask_patch_size < args.patch_size
 
+    # Concise startup summary
+    print(
+        f"[STARTUP] Experiment: {args.experiment} | Modality: {args.modality_mode} | "
+        f"Model: {args.model_name} | Patch: {args.patch_size} | Batch: {args.batch_size} | "
+        f"Devices: {args.num_devices} | Workers: {args.num_workers}"
+    )
+    print(
+        f"[STARTUP] Data dir: {args.pretrain_data_dir} | Save dir: {args.save_dir} | Precision: {args.precision}"
+    )
+
     print(f"Using num_workers: {args.num_workers}, num_devices: {args.num_devices}")
     print("ARGS:", args)
 

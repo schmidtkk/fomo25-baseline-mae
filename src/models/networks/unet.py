@@ -32,6 +32,8 @@ class UNet(YuccaNet):
         use_multi_encoder: bool = False,
         multi_encoder_modalities: list[str] | None = None,
         multi_encoder_num_modalities_global: int | None = None,
+        modality_to_global_group: dict | None = None,
+        global_vocab: list[str] | None = None,
     ):
         super().__init__()
 
@@ -49,6 +51,8 @@ class UNet(YuccaNet):
                 encoder_factory=_enc_factory,
                 starting_filters=starting_filters,
                 num_modalities_global=multi_encoder_num_modalities_global,
+                modality_to_global_group=modality_to_global_group,
+                global_vocab=global_vocab,
             )
         else:
             self.encoder = UNetEncoder(

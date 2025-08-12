@@ -32,6 +32,7 @@ from yucca.modules.callbacks.loggers import YuccaLogger
 from yucca.pipeline.configuration.split_data import get_split_config
 from yucca.pipeline.configuration.configure_paths import detect_version
 from data.dataset import CLSDataset
+from data.dataset_fusion import FusionCLSDataset
 from data.task_configs import task1_config, task2_config, task3_config, hbn_config
 from torch.utils.data import SequentialSampler
 
@@ -74,7 +75,7 @@ def main():
     parser.add_argument(
         "--model_name",
         type=str,
-        default="unet_b",
+        default="unet_xl",
         help="Model name defined in models.networks (unet_b, unet_xl, etc.)",
     )
     parser.add_argument("--precision", type=str, default="bf16-mixed")
@@ -90,6 +91,14 @@ def main():
         default=None,
         help="Comma-separated mapping modalityGroup=abs_path for pretrain ckpts. Keys in {t1,t2,flair,dwi,other,all}",
     )
+    # Explicit per-group checkpoints (preferred)
+    parser.add_argument("--t1_ckpt", type=str, default=None)
+    parser.add_argument("--t2_ckpt", type=str, default=None)
+    parser.add_argument("--flair_ckpt", type=str, default=None)
+    parser.add_argument("--dwi_ckpt", type=str, default=None)
+    parser.add_argument("--other_ckpt", type=str, default=None)
+    # Single combined checkpoint for legacy stacked finetune
+    parser.add_argument("--all_ckpt", type=str, default=None)
     parser.add_argument(
         "--modality_mapping",
         type=str,
@@ -104,6 +113,14 @@ def main():
     parser.add_argument("--num_devices", type=int, default=1)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--fast_dev_run", action="store_true")
+    # Dataset input mode switch
+    parser.add_argument(
+        "--fusion_mode",
+        type=str,
+        choices=["auto", "fusion", "stacked"],
+        default="auto",
+        help="Dataset format: fusion=per-modality folders, stacked=single .npy, auto=detect",
+    )
     # Experiment tracking
     parser.add_argument("--new_version", action="store_true")
     parser.add_argument(
@@ -147,6 +164,8 @@ def main():
     labels = task_cfg["labels"]
 
     run_type = "from_scratch" if args.pretrained_weights_path is None else "finetune"
+    # Defer weight transfer decision until after fusion detection
+    do_weight_transfer = False
     experiment_name = f"{run_type}_{args.experiment}_{args.taskid}"
 
     print(f"Using num_workers: {args.num_workers}, num_devices: {args.num_devices}")
@@ -156,6 +175,24 @@ def main():
     # Set up directory structure
     data_dir = args.data_dir
     train_data_dir = os.path.join(data_dir, task_name)
+    # If fusion dataset requested/exists, use it consistently for split discovery and loading
+    fusion_dir = os.path.join(data_dir, f"{task_name}_fusion")
+    if args.fusion_mode == "fusion":
+        use_fusion = True
+    elif args.fusion_mode == "stacked":
+        use_fusion = False
+    else:
+        use_fusion = os.path.isdir(fusion_dir)
+    train_data_dir_effective = fusion_dir if use_fusion else train_data_dir
+
+    # Configure weight transfer intent based on user mode
+    if use_fusion:
+        do_weight_transfer = (
+            (args.modality_ckpts is not None) or
+            any(getattr(args, k) is not None for k in ["t1_ckpt", "t2_ckpt", "flair_ckpt", "dwi_ckpt", "other_ckpt"]) 
+        )
+    else:
+        do_weight_transfer = (args.all_ckpt is not None) or (args.pretrained_weights_path is not None)
 
     # Path where logs, checkpoints etc is stored
     save_dir = os.path.join(args.save_dir, task_name, args.model_name)
@@ -174,12 +211,48 @@ def main():
     else:
         split_param = args.split_param
 
-    path_config = SimplePathConfig(train_data_dir=train_data_dir)
-    splits_config = get_split_config(
-        method=args.split_method,
-        param=split_param,
-        path_config=path_config,
-    )
+    if use_fusion:
+        # Build splits from subject directories (full paths) inside fusion_dir
+        subject_dirs = [
+            os.path.join(fusion_dir, d)
+            for d in sorted(os.listdir(fusion_dir))
+            if os.path.isdir(os.path.join(fusion_dir, d))
+        ]
+        assert len(subject_dirs) > 0, f"No subject directories found in fusion dir: {fusion_dir}"
+
+        # Deterministic split
+        rng = torch.Generator().manual_seed(42)
+        indices = torch.randperm(len(subject_dirs), generator=rng).tolist()
+        subject_dirs = [subject_dirs[i] for i in indices]
+
+        if args.split_method == "simple_train_val_split":
+            frac = float(split_param)
+            n_train = max(1, int(len(subject_dirs) * (1 - frac)))
+            train_list = subject_dirs[:n_train]
+            val_list = subject_dirs[n_train:]
+        else:
+            # Fallback: use 80/20 split
+            n_train = max(1, int(len(subject_dirs) * 0.8))
+            train_list = subject_dirs[:n_train]
+            val_list = subject_dirs[n_train:]
+
+        class SimpleSplitsConfig:
+            def __init__(self, train_list, val_list):
+                self._train = train_list
+                self._val = val_list
+            def train(self, split_idx):
+                return self._train
+            def val(self, split_idx):
+                return self._val
+
+        splits_config = SimpleSplitsConfig(train_list, val_list)
+    else:
+        path_config = SimplePathConfig(train_data_dir=train_data_dir_effective)
+        splits_config = get_split_config(
+            method=args.split_method,
+            param=split_param,
+            path_config=path_config,
+        )
 
     # Set up seed for reproducability
     seed = setup_seed(continue_from_most_recent)
@@ -251,7 +324,7 @@ def main():
         "compile": args.compile,
         "compile_mode": args.compile_mode,
         # Multi-encoder config
-        "use_multi_encoder": args.use_multi_encoder,
+        "use_multi_encoder": use_fusion,
         
         # Trainer specific params
         "fast_dev_run": args.fast_dev_run,
@@ -285,13 +358,16 @@ def main():
     )
 
     # Create the data module that handles loading and batching
+    # Choose dataset class: FusionCLSDataset if folder-style fusion preprocessing detected
+    dataset_cls = FusionCLSDataset if use_fusion else CLSDataset
+
     data_module = YuccaDataModule(
-        train_dataset_class=CLSDataset,  # Both classification and regression use CLSDataset
+        train_dataset_class=dataset_cls,  # Supports both stacked and per-modality fusion
         composed_train_transforms=augmenter.train_transforms,
         composed_val_transforms=augmenter.val_transforms,
         patch_size=config["patch_size"],
         batch_size=config["batch_size"],
-        train_data_dir=config["train_data_dir"],
+        train_data_dir=(train_data_dir if dataset_cls is CLSDataset else fusion_dir),
         image_extension=config["image_extension"],
         task_type=config["task_type"],
         splits_config=splits_config,
@@ -324,9 +400,28 @@ def main():
     # loggers.append(wandb_logger)
 
     # Create model and trainer
-    # If multi-encoder, include modality names in config to build the wrapper
-    if args.use_multi_encoder:
-        config["multi_encoder_modalities"] = list(task_cfg["modalities"])
+    # If fusion mode, include modality names and group mapping in config to build the wrapper
+    if use_fusion:
+        finetune_modalities = list(task_cfg["modalities"])  # e.g., FOMO1
+        config["multi_encoder_modalities"] = finetune_modalities
+        default_mapping = {
+            "DWI": "dwi",
+            "ADC": "dwi",
+            "T2FLAIR": "flair",
+            "SWI_OR_T2STAR": "other",
+        }
+        modality_to_global_group = default_mapping.copy()
+        if args.modality_mapping is not None:
+            for kv in args.modality_mapping.split(","):
+                if kv.strip() == "":
+                    continue
+                k, v = kv.split("=")
+                modality_to_global_group[k.strip()] = v.strip()
+        config["modality_to_global_group"] = modality_to_global_group
+        config["global_vocab"] = ["t1","t2","flair","dwi","other"]
+    else:
+        if args.use_multi_encoder:
+            print("Warning: --use_multi_encoder ignored in stacked mode; using single encoder.")
 
     model = BaseSupervisedModel.create(
         task_type=task_type,
@@ -351,9 +446,9 @@ def main():
         fast_dev_run=args.fast_dev_run,
     )
 
-    # Load pretrained weights if finetuning
-    if run_type == "finetune":
-        print("Transferring weights for finetuning")
+    # Load pretrained weights if requested
+    if do_weight_transfer:
+        print("Transferring pretrained weights where available")
         print(f"Checkpoint path: {ckpt_path}")
         assert ckpt_path is None, (
             "Error: You're attempting to load pretrained weights while "
@@ -362,44 +457,49 @@ def main():
             "for finetuning OR continue training without the --new_version flag, "
             "but not both."
         )
-        if not args.use_multi_encoder:
-            # Single-encoder path: load directly
-            state_dict = load_pretrained_weights(args.pretrained_weights_path, args.compile)
+        if not use_fusion:
+            # Single-encoder (stacked) path: use --all_ckpt (preferred) or --pretrained_weights_path
+            single_ckpt = args.all_ckpt if args.all_ckpt is not None else args.pretrained_weights_path
+            state_dict = load_pretrained_weights(single_ckpt, args.compile)
             state_dict = state_dict['state_dict']
-            num_successful_weights_transferred = model.load_state_dict(
-                state_dict=state_dict, strict=False
-            )
+            num_successful_weights_transferred = model.load_state_dict(state_dict=state_dict, strict=False)
         else:
             # Multi-encoder: map FOMO1 modalities to pretrain groups and load per-encoder
-            assert args.modality_ckpts is not None, "--modality_ckpts required when --use_multi_encoder"
+            # Build ckpt map from explicit flags first; then merge legacy --modality_ckpts (no 'all' fallback)
             ckpt_map = {}
-            for kv in args.modality_ckpts.split(','):
-                if kv.strip() == "":
-                    continue
-                k, v = kv.split('=')
-                ckpt_map[k.strip()] = v.strip()
-
-            default_mapping = {
-                "DWI": "dwi",
-                "ADC": "dwi",
-                "T2FLAIR": "flair",
-                "SWI_OR_T2STAR": "other",
+            explicit = {
+                "t1": args.t1_ckpt,
+                "t2": args.t2_ckpt,
+                "flair": args.flair_ckpt,
+                "dwi": args.dwi_ckpt,
+                "other": args.other_ckpt,
             }
-            mapping = default_mapping.copy()
-            if args.modality_mapping is not None:
-                for kv in args.modality_mapping.split(','):
+            for k_group, v_path in explicit.items():
+                if v_path is not None and str(v_path).strip() != "":
+                    ckpt_map[k_group] = v_path
+            if args.modality_ckpts is not None:
+                for kv in args.modality_ckpts.split(','):
                     if kv.strip() == "":
                         continue
                     k, v = kv.split('=')
-                    mapping[k.strip()] = v.strip()
+                    k = k.strip()
+                    if k == 'all':
+                        continue  # do not use implicit 'all' fallback
+                    if k not in ckpt_map:
+                        ckpt_map[k] = v.strip()
+
+            mapping = config.get("modality_to_global_group", {})
 
             merged_state = {}
             finetune_modalities = config.get("multi_encoder_modalities", [])
             for i, mod in enumerate(finetune_modalities):
-                group = mapping.get(mod, "all")
-                src_ckpt = ckpt_map.get(group, ckpt_map.get("all", None))
+                group = mapping.get(mod, None)
+                if group is None:
+                    print(f"Warning: No global group mapping for modality {mod}. Skipping weight load.")
+                    continue
+                src_ckpt = ckpt_map.get(group, None)
                 if src_ckpt is None:
-                    print(f"Warning: No checkpoint for group {group}. {mod} will use random init.")
+                    print(f"Warning: No checkpoint provided for group '{group}'. {mod} will use random init.")
                     continue
                 sd = load_pretrained_weights(src_ckpt, args.compile)["state_dict"]
                 for k, v in sd.items():
@@ -412,9 +512,8 @@ def main():
             num_successful_weights_transferred = model.load_state_dict(
                 state_dict=merged_state, strict=False
             )
-        assert (
-            num_successful_weights_transferred > 0
-        ), "No weights were successfully transferred"
+        if num_successful_weights_transferred == 0:
+            print("Warning: No weights were successfully transferred; proceeding with random init.")
     else:
         print("Training from scratch, no weights will be transferred")
 

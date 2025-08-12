@@ -20,7 +20,7 @@ class TestFinetuneMultiEncoder(unittest.TestCase):
             "task_id": 1,
             "task_type": "classification",
             "experiment": "unittest",
-            "model_name": "unet_b",
+            "model_name": "unet_xl",
             "model_dimensions": "3D",
             "run_type": "finetune",
             "save_dir": tempfile.gettempdir(),

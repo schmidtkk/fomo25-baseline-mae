@@ -128,11 +128,15 @@ class BaseSupervisedModel(L.LightningModule):
         use_multi_encoder = bool(self.config.get("use_multi_encoder", False))
         if use_multi_encoder:
             multi_modalities = list(self.config.get("multi_encoder_modalities", []))
+            modality_to_global_group = dict(self.config.get("modality_to_global_group", {}))
+            global_vocab = list(self.config.get("global_vocab", ["t1","t2","flair","dwi","other"]))
             model_kwargs.update(
                 {
                     "use_multi_encoder": True,
                     "multi_encoder_modalities": multi_modalities,
                     "multi_encoder_num_modalities_global": len(multi_modalities) if len(multi_modalities) > 0 else None,
+                    "modality_to_global_group": modality_to_global_group,
+                    "global_vocab": global_vocab,
                 }
             )
         self.model = model_class(**model_kwargs)

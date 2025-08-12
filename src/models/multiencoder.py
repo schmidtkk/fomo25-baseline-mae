@@ -21,10 +21,42 @@ class MultiModalEncoderWithFusion(nn.Module):
         num_modalities_global: Optional[int] = None,
         use_gamma: bool = True,
         use_null_token: bool = False,
+        modality_to_global_group: Optional[Dict[str, str]] = None,
+        global_vocab: Optional[List[str]] = None,
     ) -> None:
         super().__init__()
         self.modality_names = modality_names
         self.num_modalities = len(modality_names)
+        self.global_vocab = global_vocab or ["t1", "t2", "flair", "dwi", "other"]
+
+        def _infer_group(mod_name: str) -> str:
+            n = mod_name.lower()
+            if "adc" in n or "dwi" in n:
+                return "dwi"
+            if "flair" in n:
+                return "flair"
+            if n == "t1" or "t1w" in n:
+                return "t1"
+            if n == "t2" or "t2w" in n:
+                return "t2"
+            if any(tok in n for tok in ["swi", "t2s", "t2star", "t2*", "suscept"]):
+                return "other"
+            return "other"
+
+        # Build mapping with heuristics if not provided or incomplete
+        mtg: Dict[str, str] = {}
+        if modality_to_global_group is not None:
+            # normalize to lowercase tokens present in global vocab
+            for k, v in modality_to_global_group.items():
+                mtg[k] = v.lower()
+        for m in modality_names:
+            if m not in mtg:
+                mtg[m] = _infer_group(m)
+        self.modality_to_global_group = mtg
+
+        # Build group ids aligned with modality_names
+        group_index = {g: i for i, g in enumerate(self.global_vocab)}
+        self.modality_group_ids = [group_index.get(self.modality_to_global_group[m], group_index["other"]) for m in self.modality_names]
 
         # Build an encoder per modality using provided factory (must create input_channels=1 encoders)
         encoders: Dict[str, nn.Module] = {}
@@ -42,7 +74,8 @@ class MultiModalEncoderWithFusion(nn.Module):
             [
                 MaskedMeanFusion3D(
                     channels=c,
-                    num_modalities=num_modalities_global if num_modalities_global is not None else self.num_modalities,
+                    # Gamma is per global group; ensure parameter count equals len(global_vocab)
+                    num_modalities=len(self.global_vocab),
                     use_gamma=use_gamma,
                     use_null_token=use_null_token,
                 )
@@ -77,9 +110,9 @@ class MultiModalEncoderWithFusion(nn.Module):
                 mask = (x.abs().view(B, M, -1).sum(dim=-1) > 0).to(x.dtype)
 
         xs = self._split_modalities(x)
-        # Provide default modality_ids if not supplied (index by order)
+        # Provide default modality_ids as global group ids per finetune modality if not supplied
         if modality_ids is None:
-            modality_ids = list(range(self.num_modalities))
+            modality_ids = self.modality_group_ids
 
         # Collect per-modality encoder outputs
         per_mod_feats: Dict[str, List[torch.Tensor]] = {}

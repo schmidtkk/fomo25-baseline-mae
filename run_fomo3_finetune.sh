@@ -11,7 +11,10 @@ PYTHONPATH=src python src/finetune.py \
   --t1_ckpt   /mnt/cvlab/scratch/cvlab/home/hantzhan/code/fomo25-baseline-mae-main/ckpt/t1.ckpt \
   --t2_ckpt   /mnt/cvlab/scratch/cvlab/home/hantzhan/code/fomo25-baseline-mae-main/ckpt/t2.ckpt \
   --precision 32-true \
-  --epochs 200 --batch_size 2 --num_devices 1 --num_workers 8 --new_version \
-  --split_method simple_train_val_split --split_param 0.6667
+  --epochs 200 --batch_size 2 --patch_size 128 --num_devices 1 --num_workers 8 --new_version \
+  --split_method simple_train_val_split --split_param 0.6667 \
+  --enable_enhanced_aggregation \
+  --enable_training_visualization \
+  --enhanced_early_stopping robust
 
 

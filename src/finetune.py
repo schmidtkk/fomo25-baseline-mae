@@ -155,6 +155,18 @@ def main():
     parser.add_argument("--phase1_head_lr", type=float, default=5e-4)
     parser.add_argument("--phase2_head_lr", type=float, default=2e-4)
     parser.add_argument("--phase2_encoder_lr", type=float, default=1e-5)
+    
+    # Enhanced training features
+    parser.add_argument("--enable_enhanced_aggregation", action="store_true",
+                        help="Enable multiple subject-level aggregation methods")
+    parser.add_argument("--enable_training_visualization", action="store_true",
+                        help="Enable real-time training visualization")
+    parser.add_argument("--enhanced_early_stopping", type=str, default="standard",
+                        choices=["standard", "robust", "adaptive"],
+                        help="Type of early stopping to use")
+    parser.add_argument("--visualization_update_freq", type=int, default=1,
+                        help="Update visualization every N epochs")
+    
     # Optimization/stability options
     parser.add_argument("--accumulate_grad_batches", type=int, default=1,
                         help="Accumulate gradients for this many steps before optimizer step")
@@ -428,6 +440,9 @@ def main():
         "fast_dev_run": args.fast_dev_run,
         # Subject-level export
         "export_subject_probs": args.export_subject_probs,
+        # Enhanced features
+        "enhanced_aggregation_enabled": args.enable_enhanced_aggregation,
+        "training_visualization_enabled": args.enable_training_visualization,
         # Validation-time TTA
         "val_tta": args.val_tta,
         # Scheduling & LR policy
@@ -466,13 +481,69 @@ def main():
         filename="best",
         enable_version_counter=False,
     )
-    early_stop = EarlyStopping(
-        monitor=monitor_metric,
-        mode=monitor_mode,
-        patience=args.early_stop_patience,
-        min_delta=args.early_stop_min_delta,
-    )
+    
+    # Enhanced early stopping
+    if args.enhanced_early_stopping == "robust":
+        try:
+            from utils.robust_early_stopping import RobustEarlyStopping
+            early_stop = RobustEarlyStopping(
+                primary_metric=monitor_metric,
+                mode=monitor_mode,
+                patience=args.early_stop_patience,
+                min_delta=args.early_stop_min_delta,
+            )
+            print("Using RobustEarlyStopping")
+        except ImportError:
+            print("RobustEarlyStopping not available, falling back to standard")
+            early_stop = EarlyStopping(
+                monitor=monitor_metric,
+                mode=monitor_mode,
+                patience=args.early_stop_patience,
+                min_delta=args.early_stop_min_delta,
+            )
+    elif args.enhanced_early_stopping == "adaptive":
+        try:
+            from utils.robust_early_stopping import AdaptiveEarlyStopping
+            early_stop = AdaptiveEarlyStopping(
+                primary_metric=monitor_metric,
+                mode=monitor_mode,
+                initial_patience=args.early_stop_patience,
+                min_delta=args.early_stop_min_delta,
+            )
+            print("Using AdaptiveEarlyStopping")
+        except ImportError:
+            print("AdaptiveEarlyStopping not available, falling back to standard")
+            early_stop = EarlyStopping(
+                monitor=monitor_metric,
+                mode=monitor_mode,
+                patience=args.early_stop_patience,
+                min_delta=args.early_stop_min_delta,
+            )
+    else:
+        early_stop = EarlyStopping(
+            monitor=monitor_metric,
+            mode=monitor_mode,
+            patience=args.early_stop_patience,
+            min_delta=args.early_stop_min_delta,
+        )
+        
     callbacks = [checkpoint_callback, early_stop]
+    
+    # Add training visualization if enabled
+    if args.enable_training_visualization:
+        try:
+            from utils.training_visualizer import TrainingVisualizer, LiveTrainingMonitor
+            visualizer = TrainingVisualizer(
+                save_dir=version_dir,
+                enable_live_plots=True,
+                update_frequency=args.visualization_update_freq
+            )
+            viz_monitor = LiveTrainingMonitor(visualizer)
+            callbacks.append(viz_monitor)
+            print("Training visualization enabled")
+        except ImportError:
+            print("Training visualization not available")
+    
     if args.use_swa and StochasticWeightAveraging is not None:
         callbacks.append(StochasticWeightAveraging(swa_lrs=float(args.swa_lrs)))
     if args.use_ema:
@@ -584,6 +655,11 @@ def main():
         do_compile=args.compile,
         compile_mode="default" if args.compile_mode is None else args.compile_mode,
     )
+
+    # Enable enhanced aggregation if requested
+    if args.enable_enhanced_aggregation and hasattr(model, '_enhanced_aggregation_enabled'):
+        model._enhanced_aggregation_enabled = True
+        print("Enhanced subject-level aggregation enabled")
 
     # Optional channels-last memory format
     if args.channels_last:

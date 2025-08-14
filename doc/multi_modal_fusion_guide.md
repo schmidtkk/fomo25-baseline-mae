@@ -132,6 +132,7 @@
 - Set total folds and current fold via `--k_folds K` and `--fold_index f` (0-based). Splits are stratified at subject level in fusion mode.
 - Validation logs a subject-level AUROC (`val/auroc_subject`) by aggregating per-subject predictions (mean logit) before AUROC.
   - Optional validation multi-view averaging: enable with `--val_tta_enable --val_tta_views K` (up to 8). Uses deterministic 3D flips and averages logits per subject before AUROC.
+  - Optional deterministic translation offsets: add `--val_tta_offsets N` (up to 7) and `--val_tta_offset_frac 0.25` to roll inputs by ±¼ patch along axes and average logits with flips.
 
 ### Task 3 (Brain Age Regression) – Fusion Finetune
 - Canonical modalities: `("T1", "T2")`

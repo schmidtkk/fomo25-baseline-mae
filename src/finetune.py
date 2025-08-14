@@ -144,6 +144,9 @@ def main():
     # K-Fold parameters
     parser.add_argument("--k_folds", type=int, default=1, help="Total number of folds (K). If >1, use K-fold.")
     parser.add_argument("--fold_index", type=int, default=0, help="Current fold index (0-based).")
+    # Class balance
+    parser.add_argument("--balance_train", type=str, default="none", choices=["none", "match_upsample"],
+                        help="Class balancing strategy for fusion mode training list")
     # Early stopping & schedule
     parser.add_argument("--early_stop_patience", type=int, default=12)
     parser.add_argument("--early_stop_min_delta", type=float, default=0.002)
@@ -168,6 +171,10 @@ def main():
     parser.add_argument("--val_tta_enable", action="store_true")
     parser.add_argument("--val_tta_views", type=int, default=8,
                         help="Number of deterministic flip views to average (max 8)")
+    parser.add_argument("--val_tta_offsets", type=int, default=1,
+                        help="Number of deterministic translation offsets (center + axis shifts), max 7")
+    parser.add_argument("--val_tta_offset_frac", type=float, default=0.25,
+                        help="Offset as fraction of patch size along each axis (0..0.5)")
     # LR scheduler
     parser.add_argument("--lr_scheduler", type=str, default="cosine", choices=["cosine", "plateau"])
     parser.add_argument("--plateau_factor", type=float, default=0.5)
@@ -296,6 +303,24 @@ def main():
                 train_list = all_items[:n_train]
                 val_list = all_items[n_train:]
 
+        # Optional balancing (fusion mode only)
+        if str(args.balance_train) == "match_upsample":
+            # Determine class labels for train_list
+            def read_label(subj_dir: str) -> int:
+                path = os.path.join(subj_dir, "label.txt")
+                return int(float(open(path, "r").read().strip()))
+            pos_train = [sd for sd in train_list if read_label(sd) == 1]
+            neg_train = [sd for sd in train_list if read_label(sd) == 0]
+            if len(pos_train) > 0 and len(neg_train) > 0:
+                if len(pos_train) < len(neg_train):
+                    # upsample positives
+                    reps = (len(neg_train) + len(pos_train) - 1) // max(1, len(pos_train))
+                    train_list = (pos_train * reps + neg_train)[: len(neg_train) * 2]
+                elif len(neg_train) < len(pos_train):
+                    reps = (len(pos_train) + len(neg_train) - 1) // max(1, len(neg_train))
+                    train_list = (neg_train * reps + pos_train)[: len(pos_train) * 2]
+                rnd.shuffle(train_list)
+
         class SimpleSplitsConfig:
             def __init__(self, train_list, val_list):
                 self._train = train_list
@@ -395,6 +420,8 @@ def main():
 		# Validation/Test-time augmentation
 		"val_tta_enable": args.val_tta_enable,
 		"val_tta_views": int(max(1, min(8, args.val_tta_views))),
+		"val_tta_offsets": int(max(1, min(7, args.val_tta_offsets))),
+		"val_tta_offset_frac": float(max(0.0, min(0.5, args.val_tta_offset_frac))),
 
 		# Head regularization
 		"label_smoothing": max(0.0, min(0.3, float(args.label_smoothing))),

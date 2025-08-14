@@ -90,6 +90,14 @@ class SupervisedClsModel(BaseSupervisedModel):
         self._tta_codes = [
             (), (2,), (3,), (4,), (2,3), (2,4), (3,4), (2,3,4)
         ][: max(1, min(8, self._val_tta_views))]
+        # deterministic translation offsets (center + axis shifts)
+        self._val_tta_offsets = int(self.config.get("val_tta_offsets", 1))
+        self._val_tta_offset_frac = float(self.config.get("val_tta_offset_frac", 0.25))
+        # Build offsets: center, +/- along each axis (up to 7 total)
+        base = [(0, 0, 0)]
+        shifts = [(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)]
+        self._tta_offsets = base + shifts
+        self._tta_offsets = self._tta_offsets[: max(1, min(7, self._val_tta_offsets))]
 
     @staticmethod
     def _extract_subject_id(path_str: str) -> str:
@@ -111,21 +119,27 @@ class SupervisedClsModel(BaseSupervisedModel):
     def validation_step(self, batch, _batch_idx):
         # Run base validation logging (loss + per-sample metrics)
         inputs, target, file_path = self._process_batch(batch)
-        if not self._val_tta_enable or len(self._tta_codes) == 1:
+        if not self._val_tta_enable or (len(self._tta_codes) == 1 and len(self._tta_offsets) == 1):
             output = self(inputs)
         else:
-            # Average logits over deterministic flips
+            B, M, D, H, W = inputs.shape
+            dz = int(round(self._val_tta_offset_frac * D))
+            dy = int(round(self._val_tta_offset_frac * H))
+            dx = int(round(self._val_tta_offset_frac * W))
+            # Average logits over deterministic offsets and flips
             logits_sum = None
-            for code in self._tta_codes:
-                x = inputs
-                if len(code) > 0:
-                    x = torch.flip(x, dims=list(code))
-                logits = self(x)
-                if len(code) > 0:
-                    # flips do not change logits semantics; inverse not required
-                    pass
-                logits_sum = logits if logits_sum is None else (logits_sum + logits)
-            output = logits_sum / float(len(self._tta_codes))
+            num = 0
+            for oz, oy, ox in self._tta_offsets:
+                # translate via roll; for classification logits global pooled, this is acceptable
+                xoff = torch.roll(inputs, shifts=(oz * dz, oy * dy, ox * dx), dims=(2, 3, 4))
+                for code in self._tta_codes:
+                    x = xoff
+                    if len(code) > 0:
+                        x = torch.flip(x, dims=list(code))
+                    logits = self(x)
+                    logits_sum = logits if logits_sum is None else (logits_sum + logits)
+                    num += 1
+            output = logits_sum / float(max(1, num))
         loss = self.loss_fn_val(output, target)
         metrics = self.compute_metrics(self.val_metrics, output, target)
         # accumulate

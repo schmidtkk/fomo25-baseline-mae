@@ -17,4 +17,5 @@ PYTHONPATH=src python src/finetune.py \
   --label_smoothing 0.05 --cls_head_dropout_p 0.2 \
   --val_tta_enable --val_tta_views 8 \
   --grad_clip_val 1.0 --grad_clip_algo norm \
+  --lr_scheduler plateau --plateau_factor 0.5 --plateau_patience 6 --plateau_threshold 1e-3 --plateau_cooldown 0 --plateau_min_lr 1e-7 \
   --disable_early_stop

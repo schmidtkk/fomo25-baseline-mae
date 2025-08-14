@@ -168,6 +168,13 @@ def main():
     parser.add_argument("--val_tta_enable", action="store_true")
     parser.add_argument("--val_tta_views", type=int, default=8,
                         help="Number of deterministic flip views to average (max 8)")
+    # LR scheduler
+    parser.add_argument("--lr_scheduler", type=str, default="cosine", choices=["cosine", "plateau"])
+    parser.add_argument("--plateau_factor", type=float, default=0.5)
+    parser.add_argument("--plateau_patience", type=int, default=4)
+    parser.add_argument("--plateau_threshold", type=float, default=1e-3)
+    parser.add_argument("--plateau_cooldown", type=int, default=0)
+    parser.add_argument("--plateau_min_lr", type=float, default=1e-7)
     # Split Configuration
     parser.add_argument("--split_method", type=str, default="simple_train_val_split")
     parser.add_argument("--split_param", type=str, help="Split parameter", default=0.2)
@@ -392,6 +399,14 @@ def main():
 		# Head regularization
 		"label_smoothing": max(0.0, min(0.3, float(args.label_smoothing))),
 		"cls_head_dropout_p": max(0.0, min(0.8, float(args.cls_head_dropout_p))),
+
+		# LR scheduler
+		"lr_scheduler": str(args.lr_scheduler),
+		"plateau_factor": float(args.plateau_factor),
+		"plateau_patience": int(args.plateau_patience),
+		"plateau_threshold": float(args.plateau_threshold),
+		"plateau_cooldown": int(args.plateau_cooldown),
+		"plateau_min_lr": float(args.plateau_min_lr),
 
 		# Gradient clipping (for tracking)
 		"grad_clip_val": float(args.grad_clip_val),

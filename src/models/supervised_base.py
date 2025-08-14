@@ -187,16 +187,40 @@ class BaseSupervisedModel(L.LightningModule):
             betas=self.betas,
         )
 
-        # Scheduler with early cut-off factor of 1.15
-        self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self.optim, T_max=int(self.trainer.max_epochs * 1.15), eta_min=1e-9
-        )
+        # Scheduler selection
+        sched_choice = str(self.config.get("lr_scheduler", "cosine"))
+        if sched_choice == "plateau":
+            self.lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                self.optim,
+                mode="min",
+                factor=float(self.config.get("plateau_factor", 0.5)),
+                patience=int(self.config.get("plateau_patience", 4)),
+                threshold=float(self.config.get("plateau_threshold", 1e-3)),
+                cooldown=int(self.config.get("plateau_cooldown", 0)),
+                min_lr=float(self.config.get("plateau_min_lr", 1e-7)),
+                verbose=False,
+            )
+        else:
+            # Cosine with early cut-off factor of 1.15
+            self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                self.optim, T_max=int(self.trainer.max_epochs * 1.15), eta_min=1e-9
+            )
 
         # Store freeze schedule in state
         self._freeze_epochs = freeze_epochs
         self._warmup_epochs = 5
 
         # Return the optimizer and scheduler - the loss is not returned
+        if sched_choice == "plateau":
+            return {
+                "optimizer": self.optim,
+                "lr_scheduler": {
+                    "scheduler": self.lr_scheduler,
+                    "monitor": "val/loss_epoch",
+                    "interval": "epoch",
+                    "frequency": 1,
+                },
+            }
         return {"optimizer": self.optim, "lr_scheduler": self.lr_scheduler}
 
     def on_train_epoch_start(self):

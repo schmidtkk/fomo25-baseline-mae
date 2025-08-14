@@ -8,5 +8,11 @@ PYTHONPATH=src python src/finetune.py \
   --flair_ckpt /mnt/cvlab/scratch/cvlab/home/hantzhan/code/fomo25-baseline-mae-main/ckpt/flair.ckpt \
   --t1_ckpt    /mnt/cvlab/scratch/cvlab/home/hantzhan/code/fomo25-baseline-mae-main/ckpt/t1.ckpt \
   --t2_ckpt    /mnt/cvlab/scratch/cvlab/home/hantzhan/code/fomo25-baseline-mae-main/ckpt/t2.ckpt \
+  --other_ckpt /mnt/cvlab/scratch/cvlab/home/hantzhan/code/fomo25-baseline-mae-main/ckpt/other.ckpt \
   --precision 32-true \
-  --epochs 100 --batch_size 1 --num_devices 1 --num_workers 8 --new_version
+  --patch_size=128 \
+  --train_batches_per_epoch=20 \
+  --epochs 100 --batch_size 1 --num_devices 1 --num_workers 8 --new_version \
+  --freeze_encoder_epochs 12 --phase1_head_lr 5e-4 --phase2_head_lr 2e-4 --phase2_encoder_lr 2e-5 \
+  --val_tta_enable --val_tta_views 8 \
+  --disable_early_stop

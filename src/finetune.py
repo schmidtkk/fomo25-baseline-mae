@@ -147,10 +147,15 @@ def main():
     # Early stopping & schedule
     parser.add_argument("--early_stop_patience", type=int, default=12)
     parser.add_argument("--early_stop_min_delta", type=float, default=0.002)
+    parser.add_argument("--disable_early_stop", action="store_true")
     parser.add_argument("--freeze_encoder_epochs", type=int, default=15)
     parser.add_argument("--phase1_head_lr", type=float, default=5e-4)
     parser.add_argument("--phase2_head_lr", type=float, default=2e-4)
     parser.add_argument("--phase2_encoder_lr", type=float, default=1e-5)
+    # Validation/Test-time augmentation (multi-view averaging)
+    parser.add_argument("--val_tta_enable", action="store_true")
+    parser.add_argument("--val_tta_views", type=int, default=8,
+                        help="Number of deterministic flip views to average (max 8)")
     # Split Configuration
     parser.add_argument("--split_method", type=str, default="simple_train_val_split")
     parser.add_argument("--split_param", type=str, help="Split parameter", default=0.2)
@@ -346,6 +351,12 @@ def main():
         "epochs": args.epochs,
         "train_batches_per_epoch": args.train_batches_per_epoch,
         "effective_batch_size": effective_batch_size,
+
+		# Optimizer schedule (enable lower LR for encoders and optional freeze)
+		"freeze_encoder_epochs": args.freeze_encoder_epochs,
+		"phase1_head_lr": args.phase1_head_lr,
+		"phase2_head_lr": args.phase2_head_lr,
+		"phase2_encoder_lr": args.phase2_encoder_lr,
         
         # Dataset metrics
         "train_dataset_size": train_dataset_size,
@@ -361,6 +372,10 @@ def main():
         "compile_mode": args.compile_mode,
         # Multi-encoder config
         "use_multi_encoder": use_fusion,
+
+		# Validation/Test-time augmentation
+		"val_tta_enable": args.val_tta_enable,
+		"val_tta_views": int(max(1, min(8, args.val_tta_views))),
         
         # Trainer specific params
         "fast_dev_run": args.fast_dev_run,
@@ -381,13 +396,15 @@ def main():
         filename="best",
         enable_version_counter=False,
     )
-    early_stop = EarlyStopping(
-        monitor=monitor_metric,
-        mode=monitor_mode,
-        patience=args.early_stop_patience,
-        min_delta=args.early_stop_min_delta,
-    )
-    callbacks = [checkpoint_callback, early_stop]
+    callbacks = [checkpoint_callback]
+    if not args.disable_early_stop:
+        early_stop = EarlyStopping(
+            monitor=monitor_metric,
+            mode=monitor_mode,
+            patience=args.early_stop_patience,
+            min_delta=args.early_stop_min_delta,
+        )
+        callbacks.append(early_stop)
 
     # Create logger for metrics
     yucca_logger = YuccaLogger(

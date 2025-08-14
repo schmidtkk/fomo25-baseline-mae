@@ -79,6 +79,16 @@ class SupervisedClsModel(BaseSupervisedModel):
     def on_validation_epoch_start(self):
         # subject_id -> [sum_prob_pos, count, target]
         self._val_subject_aggr: Dict[str, List[float]] = {}
+        # accumulate scalar metrics to average at epoch end (robustness)
+        self._val_loss_sum = 0.0
+        self._val_count = 0
+        # deterministic flip patterns for TTA
+        self._val_tta_enable = bool(self.config.get("val_tta_enable", False))
+        self._val_tta_views = int(self.config.get("val_tta_views", 1))
+        # Precompute flip codes (up to 8: none, x, y, z, xy, xz, yz, xyz)
+        self._tta_codes = [
+            (), (2,), (3,), (4,), (2,3), (2,4), (3,4), (2,3,4)
+        ][: max(1, min(8, self._val_tta_views))]
 
     @staticmethod
     def _extract_subject_id(path_str: str) -> str:
@@ -99,12 +109,33 @@ class SupervisedClsModel(BaseSupervisedModel):
 
     def validation_step(self, batch, _batch_idx):
         # Run base validation logging (loss + per-sample metrics)
-        super().validation_step(batch, _batch_idx)
+        inputs, target, file_path = self._process_batch(batch)
+        if not self._val_tta_enable or len(self._tta_codes) == 1:
+            output = self(inputs)
+        else:
+            # Average logits over deterministic flips
+            logits_sum = None
+            for code in self._tta_codes:
+                x = inputs
+                if len(code) > 0:
+                    x = torch.flip(x, dims=list(code))
+                logits = self(x)
+                if len(code) > 0:
+                    # flips do not change logits semantics; inverse not required
+                    pass
+                logits_sum = logits if logits_sum is None else (logits_sum + logits)
+            output = logits_sum / float(len(self._tta_codes))
+        loss = self.loss_fn_val(output, target)
+        metrics = self.compute_metrics(self.val_metrics, output, target)
+        # accumulate
+        self._val_loss_sum += float(loss.detach().cpu())
+        self._val_count += 1
+        # still log per-step for live feedback
+        self.log_dict({"val/loss": loss} | metrics, prog_bar=False, logger=True)
 
         # Additional subject-level aggregation for binary AUROC in Task 1
         if self.num_classes == 2:
-            inputs, target, file_path = self._process_batch(batch)
-            output = self(inputs)
+            # reuse computed output above
             prob = F.softmax(output, dim=1)[:, 1].detach().cpu()
             target = target.detach().cpu()
 
@@ -136,6 +167,26 @@ class SupervisedClsModel(BaseSupervisedModel):
                 else:
                     # Insufficient class variety; skip AUROC
                     self.log("val/auroc_subject", torch.nan, prog_bar=True, logger=True)
+
+            # Export per-subject probabilities/targets for analysis
+            try:
+                import csv, os
+                out_dir = os.path.join(self.config.get("version_dir", "."))
+                os.makedirs(out_dir, exist_ok=True)
+                csv_path = os.path.join(out_dir, f"val_subject_scores_epoch_{self.current_epoch}.csv")
+                with open(csv_path, "w", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["subject_id", "mean_prob_pos", "target"])
+                    for sid, (sum_prob, cnt, tgt) in sorted(self._val_subject_aggr.items()):
+                        mp = (sum_prob / max(cnt, 1.0)) if cnt > 0 else float("nan")
+                        writer.writerow([sid, mp, int(tgt)])
+            except Exception:
+                pass
+
+        # Log averaged validation loss/metrics
+        if getattr(self, "_val_count", 0) > 0:
+            avg_loss = torch.tensor(self._val_loss_sum / max(self._val_count, 1), dtype=torch.float32, device=self.device)
+            self.log("val/loss_epoch", avg_loss, prog_bar=True, logger=True)
 
     def _process_batch(self, batch):
         """

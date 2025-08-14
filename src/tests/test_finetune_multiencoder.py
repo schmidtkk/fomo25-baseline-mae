@@ -60,6 +60,14 @@ class TestFinetuneMultiEncoder(unittest.TestCase):
                 "T2FLAIR",
                 "SWI_OR_T2STAR",
             ],
+            # Map finetune modalities to 5-group global vocab present in pretrain ckpts
+            "modality_to_global_group": {
+                "DWI": "dwi",
+                "ADC": "dwi",
+                "T2FLAIR": "flair",
+                "SWI_OR_T2STAR": "other",
+            },
+            "global_vocab": ["t1", "t2", "flair", "dwi", "other"],
         }
 
     def _make_pseudo_pretrain_state(self, model: BaseSupervisedModel, mods_to_fill=None):
@@ -107,6 +115,10 @@ class TestFinetuneMultiEncoder(unittest.TestCase):
 
         # Classification head outputs [B, num_classes]
         self.assertEqual(tuple(logits.shape), (B, config["num_classes"]))
+        # Fusion gamma should align with 5 pretrain groups
+        fusion0 = model.model.encoder.fusions[0]
+        if getattr(fusion0, "use_gamma", False):
+            self.assertEqual(fusion0.gamma.shape[0], 5)
 
     def test_multiple_modality_weight_combinations(self):
         combos = [
@@ -140,6 +152,10 @@ class TestFinetuneMultiEncoder(unittest.TestCase):
                 with torch.no_grad():
                     logits = model.model(x, mask=mask)
                 self.assertEqual(tuple(logits.shape), (B, config["num_classes"]))
+                # Verify modality group ids are in [0..4]
+                gids = getattr(model.model.encoder, "modality_group_ids", None)
+                self.assertIsNotNone(gids)
+                self.assertTrue(all(0 <= g <= 4 for g in gids))
 
 
 if __name__ == "__main__":

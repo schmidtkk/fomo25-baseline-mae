@@ -152,6 +152,15 @@ def main():
     parser.add_argument("--phase1_head_lr", type=float, default=5e-4)
     parser.add_argument("--phase2_head_lr", type=float, default=2e-4)
     parser.add_argument("--phase2_encoder_lr", type=float, default=1e-5)
+    # Gradient clipping
+    parser.add_argument("--grad_clip_val", type=float, default=0.0)
+    parser.add_argument(
+        "--grad_clip_algo",
+        type=str,
+        default="norm",
+        choices=["norm", "value"],
+        help="Gradient clipping algorithm (norm or value)",
+    )
     # Classification head regularization
     parser.add_argument("--label_smoothing", type=float, default=0.0)
     parser.add_argument("--cls_head_dropout_p", type=float, default=0.0)
@@ -383,6 +392,10 @@ def main():
 		# Head regularization
 		"label_smoothing": max(0.0, min(0.3, float(args.label_smoothing))),
 		"cls_head_dropout_p": max(0.0, min(0.8, float(args.cls_head_dropout_p))),
+
+		# Gradient clipping (for tracking)
+		"grad_clip_val": float(args.grad_clip_val),
+		"grad_clip_algorithm": str(args.grad_clip_algo),
         
         # Trainer specific params
         "fast_dev_run": args.fast_dev_run,
@@ -522,6 +535,8 @@ def main():
         limit_train_batches=args.train_batches_per_epoch,
         precision=args.precision,
         fast_dev_run=args.fast_dev_run,
+        gradient_clip_val=args.grad_clip_val if args.grad_clip_val and args.grad_clip_val > 0 else 0.0,
+        gradient_clip_algorithm=args.grad_clip_algo,
     )
 
     # Load pretrained weights if requested

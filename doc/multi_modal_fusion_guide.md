@@ -126,6 +126,7 @@
   ```
 - Precision:
   - If BF16 unsupported, add `--precision 16-mixed`.
+  - To stabilize training on few-shot, enable gradient clipping, for example: `--grad_clip_val 1.0 --grad_clip_algo norm`.
 
 ### K-Fold controls and metrics (Task 1)
 - Set total folds and current fold via `--k_folds K` and `--fold_index f` (0-based). Splits are stratified at subject level in fusion mode.

@@ -81,7 +81,9 @@ class UNet(YuccaNet):
             )
         elif mode in ["classification", "regression"]:
             self.decoder = ClsRegHead(
-                in_channels=starting_filters * 16, num_classes=output_channels
+                in_channels=starting_filters * 16,
+                num_classes=output_channels,
+                dropout_p=float(getattr(self, "cls_head_dropout_p", 0.0)) if hasattr(self, "cls_head_dropout_p") else 0.0,
             )
         elif mode == "enc":
             self.decoder = nn.Identity()

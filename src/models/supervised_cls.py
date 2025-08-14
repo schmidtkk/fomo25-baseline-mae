@@ -71,8 +71,9 @@ class SupervisedClsModel(BaseSupervisedModel):
         Returns:
             tuple: (train_loss_fn, val_loss_fn)
         """
-        # For classification, we typically use cross-entropy loss
-        loss_fn = torch.nn.CrossEntropyLoss()
+        # For classification, use cross-entropy with optional label smoothing
+        smoothing = float(self.config.get("label_smoothing", 0.0))
+        loss_fn = torch.nn.CrossEntropyLoss(label_smoothing=smoothing)
         return loss_fn, loss_fn
 
     # ---- Subject-level AUROC aggregation (Task 1) ----

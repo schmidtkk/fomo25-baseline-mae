@@ -122,6 +122,8 @@ class BaseSupervisedModel(L.LightningModule):
             "checkpoint_style": None,
             # ensure not pretraining
             "mode": self.task_type,  # Pass task_type directly
+            # Head regularization
+            "cls_head_dropout_p": float(self.config.get("cls_head_dropout_p", 0.0)),
         }
         model_kwargs = filter_kwargs(model_class, model_kwargs)
         # Multi-encoder integration (optional via config)

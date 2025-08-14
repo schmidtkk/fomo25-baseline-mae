@@ -152,6 +152,9 @@ def main():
     parser.add_argument("--phase1_head_lr", type=float, default=5e-4)
     parser.add_argument("--phase2_head_lr", type=float, default=2e-4)
     parser.add_argument("--phase2_encoder_lr", type=float, default=1e-5)
+    # Classification head regularization
+    parser.add_argument("--label_smoothing", type=float, default=0.0)
+    parser.add_argument("--cls_head_dropout_p", type=float, default=0.0)
     # Validation/Test-time augmentation (multi-view averaging)
     parser.add_argument("--val_tta_enable", action="store_true")
     parser.add_argument("--val_tta_views", type=int, default=8,
@@ -376,6 +379,10 @@ def main():
 		# Validation/Test-time augmentation
 		"val_tta_enable": args.val_tta_enable,
 		"val_tta_views": int(max(1, min(8, args.val_tta_views))),
+
+		# Head regularization
+		"label_smoothing": max(0.0, min(0.3, float(args.label_smoothing))),
+		"cls_head_dropout_p": max(0.0, min(0.8, float(args.cls_head_dropout_p))),
         
         # Trainer specific params
         "fast_dev_run": args.fast_dev_run,

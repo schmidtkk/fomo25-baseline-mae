@@ -121,7 +121,8 @@
     --model_name unet_xl \
     --use_multi_encoder \
     --modality_ckpts "dwi=/abs/path/dwi.ckpt,flair=/abs/path/flair.ckpt,other=/abs/path/other.ckpt" \
-    --epochs 100 --batch_size 2 --num_devices 1 --num_workers 8 --new_version
+    --epochs 100 --batch_size 2 --num_devices 1 --num_workers 8 --new_version \
+    --label_smoothing 0.05 --cls_head_dropout_p 0.2
   ```
 - Precision:
   - If BF16 unsupported, add `--precision 16-mixed`.

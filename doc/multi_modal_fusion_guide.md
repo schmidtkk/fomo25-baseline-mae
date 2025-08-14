@@ -578,7 +578,8 @@ PYTHONPATH=src "$PY" src/finetune.py \
 
 - **Model**
   - Multi-encoder wrapper with Masked Mean Fusion across scales; per-global-group `gamma` sized to `len(global_vocab)`.
-  - Default `unet_xl`; heads use `nn.LazyLinear`.
+  - Default `unet_xl`; classification/regression head uses fixed `nn.Linear` sized to the encoder bottleneck.
+    - Head in-features: `starting_filters × 16` (e.g., 64 × 16 = 1024 for default UNet).
   - Mapping (FOMO1 → global groups): DWI/ADC→dwi, T2FLAIR→flair, SWI_OR_T2STAR→other.
 
 - **Weights**

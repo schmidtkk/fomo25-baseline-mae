@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BASE_SAVE_DIR=./runs/fomo1_k3
+BASE_SAVE_DIR=./runs/fomo1_k3_simple
 K=3
 
 for f in $(seq 0 $((K-1))); do
@@ -18,13 +18,9 @@ for f in $(seq 0 $((K-1))); do
     --other_ckpt /mnt/cvlab/scratch/cvlab/home/hantzhan/code/fomo25-baseline-mae-main/ckpt/other.ckpt \
     --precision 32-true \
     --epochs 500 --batch_size 2 --patch_size 128 --num_devices 1 --num_workers 2 --new_version \
-    --use_ema \
-    --export_subject_probs \
     --k_folds ${K} --fold_index ${f} \
-    --enable_enhanced_aggregation \
-    --enable_training_visualization \
-    --enhanced_early_stopping robust \
-    --early_stop_patience 20 \
-    --early_stop_min_delta 0.001 \
-    --visualization_update_freq 2
+    --early_stop_patience 1000000 \
+    --enhanced_early_stopping standard
 done
+
+

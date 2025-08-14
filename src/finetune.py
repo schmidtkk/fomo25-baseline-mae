@@ -148,13 +148,10 @@ def main():
     # K-Fold parameters
     parser.add_argument("--k_folds", type=int, default=1, help="Total number of folds (K). If >1, use K-fold.")
     parser.add_argument("--fold_index", type=int, default=0, help="Current fold index (0-based).")
-    # Early stopping & schedule
+    # Early stopping & freeze
     parser.add_argument("--early_stop_patience", type=int, default=12)
     parser.add_argument("--early_stop_min_delta", type=float, default=0.002)
-    parser.add_argument("--freeze_encoder_epochs", type=int, default=15)
-    parser.add_argument("--phase1_head_lr", type=float, default=5e-4)
-    parser.add_argument("--phase2_head_lr", type=float, default=2e-4)
-    parser.add_argument("--phase2_encoder_lr", type=float, default=1e-5)
+    parser.add_argument("--freeze_encoder_epochs", type=int, default=0)
     
     # Enhanced training features
     parser.add_argument("--enable_enhanced_aggregation", action="store_true",
@@ -455,22 +452,27 @@ def main():
         "focal_gamma": args.focal_gamma,
         "focal_alpha": args.focal_alpha,
         "label_smoothing": args.label_smoothing,
+
+        # Encoder freeze configuration
+        "freeze_encoder_epochs": args.freeze_encoder_epochs,
     }
 
-    # Choose monitor metric
+    # Choose checkpoint monitor metric (task-specific)
     monitor_metric = "val/loss"
     monitor_mode = "min"
     if task_type == "classification" and num_classes == 2:
         monitor_metric = "val/auroc_subject"
         monitor_mode = "max"
     elif task_type == "regression":
-        # Prefer Absolute Error (MAE) for brain age regression
         monitor_metric = "val/mae"
         monitor_mode = "min"
     elif task_type == "segmentation":
-        # Track dice for foreground (class 1) if available
         monitor_metric = "val/dice_1"
         monitor_mode = "max"
+
+    # Early stopping should focus on validation loss
+    early_stop_monitor = "val/loss"
+    early_stop_mode = "min"
 
     # Checkpoint and early stopping callbacks
     checkpoint_callback = ModelCheckpoint(
@@ -482,13 +484,13 @@ def main():
         enable_version_counter=False,
     )
     
-    # Enhanced early stopping
+    # Enhanced early stopping (monitor val/loss regardless of task)
     if args.enhanced_early_stopping == "robust":
         try:
             from utils.robust_early_stopping import RobustEarlyStopping
             early_stop = RobustEarlyStopping(
-                primary_metric=monitor_metric,
-                mode=monitor_mode,
+                primary_metric=early_stop_monitor,
+                mode=early_stop_mode,
                 patience=args.early_stop_patience,
                 min_delta=args.early_stop_min_delta,
             )
@@ -496,8 +498,8 @@ def main():
         except ImportError:
             print("RobustEarlyStopping not available, falling back to standard")
             early_stop = EarlyStopping(
-                monitor=monitor_metric,
-                mode=monitor_mode,
+                monitor=early_stop_monitor,
+                mode=early_stop_mode,
                 patience=args.early_stop_patience,
                 min_delta=args.early_stop_min_delta,
             )
@@ -505,8 +507,8 @@ def main():
         try:
             from utils.robust_early_stopping import AdaptiveEarlyStopping
             early_stop = AdaptiveEarlyStopping(
-                primary_metric=monitor_metric,
-                mode=monitor_mode,
+                primary_metric=early_stop_monitor,
+                mode=early_stop_mode,
                 initial_patience=args.early_stop_patience,
                 min_delta=args.early_stop_min_delta,
             )
@@ -514,15 +516,15 @@ def main():
         except ImportError:
             print("AdaptiveEarlyStopping not available, falling back to standard")
             early_stop = EarlyStopping(
-                monitor=monitor_metric,
-                mode=monitor_mode,
+                monitor=early_stop_monitor,
+                mode=early_stop_mode,
                 patience=args.early_stop_patience,
                 min_delta=args.early_stop_min_delta,
             )
     else:
         early_stop = EarlyStopping(
-            monitor=monitor_metric,
-            mode=monitor_mode,
+            monitor=early_stop_monitor,
+            mode=early_stop_mode,
             patience=args.early_stop_patience,
             min_delta=args.early_stop_min_delta,
         )
@@ -765,7 +767,7 @@ def main():
         print("Training from scratch, no weights will be transferred")
 
     # Start training
-    trainer.fit(model=model, datamodule=data_module, ckpt_path="last")
+    trainer.fit(model=model, datamodule=data_module, ckpt_path=ckpt_path)
     # wandb.finish()
 
 

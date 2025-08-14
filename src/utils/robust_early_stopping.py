@@ -33,9 +33,14 @@ class RobustEarlyStopping(EarlyStopping):
             min_epochs_before_stop: Minimum epochs before early stopping can trigger
             **kwargs: Additional arguments for base EarlyStopping
         """
-        super().__init__(monitor=primary_metric, **kwargs)
+        # Initialize base EarlyStopping; avoid passing duplicate 'monitor'
+        if 'monitor' in kwargs:
+            super().__init__(**kwargs)
+            self.primary_metric = kwargs['monitor']
+        else:
+            super().__init__(monitor=primary_metric, **kwargs)
         
-        self.primary_metric = primary_metric
+        self.primary_metric = getattr(self, 'primary_metric', primary_metric)
         self.ensemble_metrics = ensemble_metrics or [
             "val/auroc_subject_mean_logit",
             "val/auroc_subject_noisy_or",
@@ -50,8 +55,8 @@ class RobustEarlyStopping(EarlyStopping):
         self.ensemble_history = []
         self.smoothed_history = []
         
-        # Override monitor to use our custom logic
-        self.monitor = "ensemble_metric"  # Internal use
+        # Keep EarlyStopping.monitor as the primary metric so Lightning doesn't error.
+        # We still compute an internal ensemble metric for our own stopping logic.
         
         print(f"RobustEarlyStopping initialized:")
         print(f"  Primary metric: {self.primary_metric}")

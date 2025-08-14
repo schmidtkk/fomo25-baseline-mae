@@ -10,6 +10,7 @@ from collections import defaultdict
 from typing import Dict, List, Optional, Any
 import seaborn as sns
 from pathlib import Path
+from lightning.pytorch.callbacks import Callback
 
 # Set matplotlib backend for server environments
 plt.switch_backend('Agg')
@@ -22,7 +23,7 @@ class TrainingVisualizer:
     during training to monitor progress and compare aggregation methods.
     """
     
-    def __init__(self, save_dir: str, enable_live_plots: bool = True, 
+    def __init__(self, save_dir: str, enable_live_plots: bool = True,
                  update_frequency: int = 1, figsize: tuple = (20, 15)):
         """
         Initialize the training visualizer.
@@ -34,24 +35,23 @@ class TrainingVisualizer:
             figsize: Figure size for the dashboard
         """
         self.save_dir = Path(save_dir)
-        self.plots_dir = self.save_dir / "training_plots"
-        self.plots_dir.mkdir(parents=True, exist_ok=True)
+        self.save_dir.mkdir(parents=True, exist_ok=True)
         
         self.enable_live = enable_live_plots
         self.update_frequency = update_frequency
         self.figsize = figsize
         
-        # Metrics tracking
-        self.metrics_history = defaultdict(list)
-        self.epoch_history = []
-        self.subject_results_history = []
+        # Metrics tracking (list of dict snapshots per epoch)
+        self.metrics_history: List[Dict[str, float]] = []
+        self.aggregation_history: List[Dict[str, float]] = []
         
         # Plot styling
         plt.style.use('seaborn-v0_8-darkgrid')
         self.colors = sns.color_palette("husl", 10)
         
-    def update_metrics(self, epoch: int, metrics_dict: Dict[str, float], 
-                      subject_results: Optional[Dict] = None):
+    def update_metrics(self, epoch: int, train_metrics: Dict[str, float],
+                       val_metrics: Dict[str, float],
+                       aggregation_aurocs: Optional[Dict[str, float]] = None):
         """
         Update metrics history and generate plots if enabled.
         
@@ -60,25 +60,39 @@ class TrainingVisualizer:
             metrics_dict: Dictionary of logged metrics
             subject_results: Results from different aggregation methods
         """
-        self.epoch_history.append(epoch)
-        
-        # Store metrics
-        for metric_name, value in metrics_dict.items():
-            if isinstance(value, (int, float)) and not np.isnan(value):
-                self.metrics_history[metric_name].append(value)
-        
-        # Store subject results
-        if subject_results:
-            self.subject_results_history.append({
-                'epoch': epoch,
-                'results': subject_results
-            })
-        
-        # Generate plots
-        if self.enable_live and (epoch % self.update_frequency == 0):
-            self.generate_training_dashboard(epoch)
+        # Flatten and store snapshot
+        snapshot: Dict[str, float] = {'epoch': epoch}
+        for k, v in (train_metrics or {}).items():
+            try:
+                valf = float(v)
+                if not np.isnan(valf):
+                    snapshot[f'train_{k}'] = valf
+            except Exception:
+                continue
+        for k, v in (val_metrics or {}).items():
+            try:
+                valf = float(v)
+                if not np.isnan(valf):
+                    snapshot[f'val_{k}'] = valf
+            except Exception:
+                continue
+        self.metrics_history.append(snapshot)
+
+        # Store aggregation AUROCs per epoch if provided
+        if aggregation_aurocs:
+            entry = {'epoch': epoch}
+            for k, v in aggregation_aurocs.items():
+                try:
+                    entry[k] = float(v)
+                except Exception:
+                    continue
+            self.aggregation_history.append(entry)
+
+        # Generate plots on schedule
+        if self.enable_live and (epoch % self.update_frequency == 0 or epoch == 0):
+            self.generate_training_dashboard()
             
-    def generate_training_dashboard(self, epoch: int):
+    def generate_training_dashboard(self, epoch: Optional[int] = None):
         """Generate comprehensive training dashboard."""
         try:
             fig = plt.figure(figsize=self.figsize)
@@ -112,13 +126,16 @@ class TrainingVisualizer:
             
             plt.suptitle(f'Training Dashboard - Epoch {epoch}', fontsize=16, fontweight='bold')
             
+            # Determine epoch for filenames
+            use_epoch = epoch if epoch is not None else (self.metrics_history[-1]['epoch'] if self.metrics_history else 0)
+
             # Save plot
-            plot_path = self.plots_dir / f"dashboard_epoch_{epoch:04d}.png"
+            plot_path = self._get_epoch_dashboard_path(use_epoch)
             plt.savefig(plot_path, dpi=150, bbox_inches='tight')
             plt.close()
             
             # Also save latest as current
-            latest_path = self.plots_dir / "latest_dashboard.png"
+            latest_path = self._get_latest_dashboard_path()
             plt.savefig(latest_path, dpi=150, bbox_inches='tight')
             
             print(f"Training dashboard saved to {plot_path}")
@@ -129,16 +146,15 @@ class TrainingVisualizer:
     
     def _plot_loss_curves(self, ax):
         """Plot training and validation loss curves."""
-        train_loss = self.metrics_history.get('train/loss', [])
-        val_loss = self.metrics_history.get('val/loss', [])
-        
-        if train_loss:
-            epochs = self.epoch_history[:len(train_loss)]
-            ax.plot(epochs, train_loss, label='Train Loss', color=self.colors[0], linewidth=2)
-        
-        if val_loss:
-            epochs = self.epoch_history[:len(val_loss)]
-            ax.plot(epochs, val_loss, label='Val Loss', color=self.colors[1], linewidth=2)
+        if not self.metrics_history:
+            return
+        epochs = [m['epoch'] for m in self.metrics_history]
+        train_losses = [m.get('train_loss') for m in self.metrics_history if 'train_loss' in m]
+        val_losses = [m.get('val_loss') for m in self.metrics_history if 'val_loss' in m]
+        if train_losses:
+            ax.plot(epochs[:len(train_losses)], train_losses, label='Train Loss', color=self.colors[0], linewidth=2)
+        if val_losses:
+            ax.plot(epochs[:len(val_losses)], val_losses, label='Val Loss', color=self.colors[1], linewidth=2)
         
         ax.set_xlabel('Epoch')
         ax.set_ylabel('Loss')
@@ -148,23 +164,18 @@ class TrainingVisualizer:
     
     def _plot_auroc_comparison(self, ax):
         """Plot comparison of different AUROC aggregation methods."""
-        auroc_methods = [key for key in self.metrics_history.keys() 
-                        if 'auroc_subject' in key and 'val/' in key]
-        
-        if not auroc_methods:
+        if not self.aggregation_history:
             ax.text(0.5, 0.5, 'No AUROC metrics available', 
                    ha='center', va='center', transform=ax.transAxes)
             ax.set_title('AUROC Method Comparison')
             return
-        
-        for i, method in enumerate(auroc_methods):
-            values = self.metrics_history[method]
-            if values:
-                epochs = self.epoch_history[:len(values)]
-                method_name = method.replace('val/auroc_subject_', '').replace('val/auroc_subject', 'current')
-                ax.plot(epochs, values, label=method_name, 
-                       color=self.colors[i % len(self.colors)], 
-                       linewidth=2, marker='o', markersize=3)
+        # Collect methods
+        methods = sorted({k for entry in self.aggregation_history for k in entry.keys() if k != 'epoch'})
+        epochs = [e['epoch'] for e in self.aggregation_history]
+        for i, method in enumerate(methods):
+            vals = [e.get(method) for e in self.aggregation_history]
+            if any(v is not None for v in vals):
+                ax.plot(epochs, vals, label=method, color=self.colors[i % len(self.colors)], linewidth=2, marker='o', markersize=3)
         
         ax.set_xlabel('Epoch')
         ax.set_ylabel('AUROC')
@@ -308,19 +319,15 @@ class TrainingVisualizer:
     
     def save_metrics_history(self):
         """Save metrics history to JSON for later analysis."""
-        history_path = self.plots_dir / "metrics_history.json"
-        
-        # Convert numpy arrays to lists for JSON serialization
-        serializable_history = {}
-        for key, values in self.metrics_history.items():
-            serializable_history[key] = [float(v) if not np.isnan(v) else None for v in values]
-        
+        history_path = self.save_dir / "metrics_history.json"
         with open(history_path, 'w') as f:
-            json.dump({
-                'epochs': self.epoch_history,
-                'metrics': serializable_history,
-                'subject_results_count': len(self.subject_results_history)
-            }, f, indent=2)
+            json.dump({'history': self.metrics_history, 'aggregation': self.aggregation_history}, f, indent=2)
+
+    def _get_latest_dashboard_path(self) -> Path:
+        return self.save_dir / "latest_dashboard.png"
+
+    def _get_epoch_dashboard_path(self, epoch: int) -> Path:
+        return self.save_dir / f"dashboard_epoch_{epoch:04d}.png"
     
     def generate_final_summary(self):
         """Generate final training summary plots."""
@@ -357,7 +364,7 @@ class TrainingVisualizer:
             plt.tight_layout()
             plt.suptitle('Training Summary', fontsize=16, fontweight='bold', y=1.02)
             
-            summary_path = self.plots_dir / "training_summary.png"
+            summary_path = self.save_dir / "training_summary.png"
             plt.savefig(summary_path, dpi=150, bbox_inches='tight')
             plt.close()
             
@@ -368,41 +375,124 @@ class TrainingVisualizer:
             plt.close('all')
 
 
-class LiveTrainingMonitor:
+class LiveTrainingMonitor(Callback):
     """
     Lightweight monitor that can be used as a Lightning callback
     to integrate with the training process.
     """
     
-    def __init__(self, visualizer: TrainingVisualizer):
-        self.visualizer = visualizer
+    def __init__(self, save_dir: Path | str, update_frequency: int = 1):
+        super().__init__()
+        self.update_frequency = int(update_frequency)
+        self.visualizer = TrainingVisualizer(save_dir=save_dir, enable_live_plots=True, update_frequency=update_frequency)
+
+    def _should_update(self, epoch: int) -> bool:
+        try:
+            return (epoch % self.update_frequency) == 0
+        except Exception:
+            return True
+
+    def _extract_aggregation_aurocs(self, callback_metrics: Dict[str, Any]) -> Dict[str, float]:
+        out: Dict[str, float] = {}
+        for k, v in callback_metrics.items():
+            if not isinstance(k, str):
+                continue
+            if k.startswith('val_auroc_subject_') and k != 'val_auroc_subject':
+                name = k.replace('val_auroc_subject_', '')
+                try:
+                    out[name] = float(v.item() if hasattr(v, 'item') else float(v))
+                except Exception:
+                    continue
+        return out
+
+    def _extract_train_val_metrics(self, callback_metrics: Dict[str, Any]) -> (Dict[str, float], Dict[str, float]):
+        train: Dict[str, float] = {}
+        val: Dict[str, float] = {}
+        for k, v in callback_metrics.items():
+            if not isinstance(k, str):
+                continue
+            # Skip aggregation-specific
+            if k.startswith('val_auroc_subject_') and k != 'val_auroc_subject':
+                continue
+            try:
+                valf = float(v.item() if hasattr(v, 'item') else float(v))
+            except Exception:
+                continue
+            if k.startswith('train_'):
+                train[k.replace('train_', '')] = valf
+            elif k.startswith('val_'):
+                val[k.replace('val_', '')] = valf
+        return train, val
         
     def on_validation_epoch_end(self, trainer, pl_module):
         """Called at the end of validation epoch."""
-        # Extract metrics from trainer
-        metrics = trainer.logged_metrics
-        epoch = trainer.current_epoch
-        
-        # Convert tensor metrics to float
-        float_metrics = {}
-        for key, value in metrics.items():
-            try:
-                if hasattr(value, 'item'):
-                    float_metrics[key] = value.item()
-                else:
-                    float_metrics[key] = float(value)
-            except:
-                continue
-        
-        # Get subject results if available
-        subject_results = None
-        if hasattr(pl_module, '_last_subject_results'):
-            subject_results = pl_module._last_subject_results
-        
-        # Update visualizer
-        self.visualizer.update_metrics(epoch, float_metrics, subject_results)
+        metrics = getattr(trainer, 'callback_metrics', {})
+        epoch = getattr(trainer, 'current_epoch', 0)
+        train_metrics, val_metrics = self._extract_train_val_metrics(metrics)
+        aggregation_aurocs = self._extract_aggregation_aurocs(metrics)
+
+        if self._should_update(epoch):
+            self.visualizer.update_metrics(epoch, train_metrics, val_metrics, aggregation_aurocs or None)
+            self.visualizer.generate_training_dashboard()
     
     def on_train_end(self, trainer, pl_module):
         """Called when training ends."""
         self.visualizer.save_metrics_history()
         self.visualizer.generate_final_summary()
+
+    def _get_latest_dashboard_path(self) -> Path:
+        return self.visualizer._get_latest_dashboard_path()
+
+    # File path helpers for tests
+    def _get_epoch_dashboard_path(self, epoch: int) -> Path:
+        return self.visualizer._get_epoch_dashboard_path(epoch)
+
+    # Add path helpers on visualizer
+    def _unused(self):
+        pass
+
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    

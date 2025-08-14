@@ -148,9 +148,6 @@ class BaseSupervisedModel(L.LightningModule):
 
         # Two-phase finetune support: optionally freeze encoders
         freeze_epochs = int(self.config.get("freeze_encoder_epochs", 0))
-        phase1_head_lr = float(self.config.get("phase1_head_lr", self.learning_rate))
-        phase2_head_lr = float(self.config.get("phase2_head_lr", self.learning_rate))
-        phase2_encoder_lr = float(self.config.get("phase2_encoder_lr", self.learning_rate))
 
         # Parameter groups: identify encoder vs head (optional layer-wise decay)
         apply_layerwise = bool(self.config.get("apply_layerwise_lr_decay", False))
@@ -185,21 +182,21 @@ class BaseSupervisedModel(L.LightningModule):
             for p in encoder_params_flat:
                 p.requires_grad = False
             param_groups = [
-                {"params": head_params, "lr": phase1_head_lr},
+                {"params": head_params},
             ]
         else:
             if len(param_groups) == 1:
                 # Single encoder group
                 param_groups = [
-                    {"params": param_groups[0]["params"], "lr": phase2_encoder_lr},
-                    {"params": head_params, "lr": phase2_head_lr},
+                    {"params": param_groups[0]["params"]},
+                    {"params": head_params},
                 ]
             else:
                 # Layer-wise groups with lr multipliers
                 lr_groups = []
                 for g in param_groups:
-                    lr_groups.append({"params": g["params"], "lr": phase2_encoder_lr * float(g.get("lr_mult", 1.0))})
-                param_groups = lr_groups + [{"params": head_params, "lr": phase2_head_lr}]
+                    lr_groups.append({"params": g["params"]})
+                param_groups = lr_groups + [{"params": head_params}]
 
         self.optim = AdamW(
             param_groups,
@@ -257,9 +254,6 @@ class BaseSupervisedModel(L.LightningModule):
                 for name, p in self.model.named_parameters():
                     if ".encoders." in name or name.startswith("encoder"):
                         p.requires_grad = True
-                # Adjust LRs to phase 2
-                phase2_encoder_lr = float(self.config.get("phase2_encoder_lr", self.learning_rate))
-                phase2_head_lr = float(self.config.get("phase2_head_lr", self.learning_rate))
                 # Rebuild param groups with desired LRs
                 encoder_params = []
                 head_params = []
@@ -272,9 +266,9 @@ class BaseSupervisedModel(L.LightningModule):
                         head_params.append(p)
                 self.optim.param_groups.clear()
                 if len(encoder_params) > 0:
-                    self.optim.add_param_group({"params": encoder_params, "lr": phase2_encoder_lr})
+                    self.optim.add_param_group({"params": encoder_params})
                 if len(head_params) > 0:
-                    self.optim.add_param_group({"params": head_params, "lr": phase2_head_lr})
+                    self.optim.add_param_group({"params": head_params})
 
     def forward(self, inputs):
         """Forward pass through the model"""

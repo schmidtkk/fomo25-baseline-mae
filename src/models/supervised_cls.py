@@ -109,7 +109,7 @@ class SupervisedClsModel(BaseSupervisedModel):
 
     # ---- Subject-level AUROC aggregation (Task 1) ----
     def on_validation_epoch_start(self):
-        # subject_id -> [sum_prob_pos, count, target]
+        # subject_id -> [sum_prob_pos, count, target, individual_probs]
         self._val_subject_aggr: Dict[str, List[float]] = {}
 
     @staticmethod
@@ -121,10 +121,27 @@ class SupervisedClsModel(BaseSupervisedModel):
     def _mean_probs_targets_from_aggr(aggr: Dict[str, List[float]]):
         probs = []
         targets = []
-        for _, (sum_prob, cnt, tgt) in aggr.items():
-            if cnt > 0:
-                probs.append(sum_prob / cnt)
-                targets.append(tgt)
+        for _sid, data in aggr.items():
+            # Support both legacy [sum_prob, cnt, tgt] and new [sum_prob, cnt, tgt, individual_probs]
+            sum_prob = None
+            cnt = None
+            tgt = None
+            try:
+                if isinstance(data, (list, tuple)):
+                    if len(data) >= 3:
+                        sum_prob, cnt, tgt = data[0], data[1], data[2]
+                elif isinstance(data, dict):
+                    # Optional dict format support
+                    sum_prob = float(data.get("sum_prob", 0.0))
+                    cnt = float(data.get("count", 0.0))
+                    tgt = int(data.get("target", 0))
+            except Exception:
+                continue
+            if sum_prob is None or cnt is None or tgt is None:
+                continue
+            if float(cnt) > 0:
+                probs.append(float(sum_prob) / float(cnt))
+                targets.append(int(tgt))
         if len(probs) == 0:
             return None, None
         return torch.tensor(probs, dtype=torch.float32), torch.tensor(targets, dtype=torch.int64)

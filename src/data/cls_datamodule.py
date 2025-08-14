@@ -72,6 +72,7 @@ class CLSDataModule(pl.LightningDataModule):
         super().__init__()
 
         self.batch_size = batch_size
+        self.val_batch_size = batch_size
         self.patch_size = patch_size
         self.image_extension = image_extension
         self.task_type = task_type
@@ -174,7 +175,7 @@ class CLSDataModule(pl.LightningDataModule):
         return DataLoader(
             self.val_dataset,
             num_workers=self.val_num_workers,
-            batch_size=self.batch_size,
+            batch_size=self.val_batch_size,
             pin_memory=torch.cuda.is_available(),
             sampler=sampler,
         )

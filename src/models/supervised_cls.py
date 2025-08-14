@@ -36,6 +36,8 @@ class SupervisedClsModel(BaseSupervisedModel):
             betas=betas,
             deep_supervision=False,  # Classification doesn't use deep supervision
         )
+        # initialize losses for tests that inspect them directly
+        self.loss_fn_train, self.loss_fn_val = self._configure_losses()
 
     def _configure_metrics(self, prefix: str):
         """
@@ -118,6 +120,9 @@ class SupervisedClsModel(BaseSupervisedModel):
 
     def validation_step(self, batch, _batch_idx):
         # Run base validation logging (loss + per-sample metrics)
+        # Ensure TTA state exists for unit tests that call validation_step directly
+        if not hasattr(self, "_val_tta_enable"):
+            self.on_validation_epoch_start()
         inputs, target, file_path = self._process_batch(batch)
         if not self._val_tta_enable or (len(self._tta_codes) == 1 and len(self._tta_offsets) == 1):
             output = self(inputs)
@@ -126,27 +131,59 @@ class SupervisedClsModel(BaseSupervisedModel):
             dz = int(round(self._val_tta_offset_frac * D))
             dy = int(round(self._val_tta_offset_frac * H))
             dx = int(round(self._val_tta_offset_frac * W))
-            # Average logits over deterministic offsets and flips
-            logits_sum = None
-            num = 0
+            combos_per_step = int(max(1, getattr(self, "config", {}).get("val_tta_batch_size", 8)))
+            # Build list of combo tuples to avoid holding all tensors at once
+            combo_tuples = []
             for oz, oy, ox in self._tta_offsets:
-                # translate via roll; for classification logits global pooled, this is acceptable
-                xoff = torch.roll(inputs, shifts=(oz * dz, oy * dy, ox * dx), dims=(2, 3, 4))
                 for code in self._tta_codes:
-                    x = xoff
+                    combo_tuples.append((oz, oy, ox, code))
+            total_combos = len(combo_tuples)
+            # Accumulate logits per sample index
+            sum_logits = None
+            processed = 0
+            i = 0
+            while i < total_combos:
+                # Determine group size and build a stacked mini-batch [group*B, ...]
+                g = min(combos_per_step, total_combos - i)
+                # Build on-the-fly to limit memory
+                mini = []
+                for j in range(g):
+                    oz, oy, ox, code = combo_tuples[i + j]
+                    x = torch.roll(inputs, shifts=(oz * dz, oy * dy, ox * dx), dims=(2, 3, 4))
                     if len(code) > 0:
                         x = torch.flip(x, dims=list(code))
-                    logits = self(x)
-                    logits_sum = logits if logits_sum is None else (logits_sum + logits)
-                    num += 1
-            output = logits_sum / float(max(1, num))
+                    mini.append(x)
+                try:
+                    X = torch.cat(mini, dim=0)  # [g*B, M, D, H, W]
+                    logits = self(X)            # [g*B, C]
+                except RuntimeError as e:
+                    if "out of memory" in str(e).lower() and combos_per_step > 1:
+                        # Reduce group size and retry without crashing validation
+                        combos_per_step = max(1, combos_per_step // 2)
+                        continue
+                    raise
+                C = logits.shape[-1]
+                if sum_logits is None:
+                    sum_logits = torch.zeros(B, C, device=logits.device, dtype=logits.dtype)
+                # reshape to [g, B, C] and sum over g
+                logits = logits.view(g, B, C).sum(dim=0)
+                sum_logits = sum_logits + logits
+                processed += g
+                i += g
+            # Average over all combos
+            output = sum_logits / float(max(1, processed))
         loss = self.loss_fn_val(output, target)
         metrics = self.compute_metrics(self.val_metrics, output, target)
-        # accumulate
-        self._val_loss_sum += float(loss.detach().cpu())
-        self._val_count += 1
-        # still log per-step for live feedback
-        self.log_dict({"val/loss": loss} | metrics, prog_bar=False, logger=True)
+        # accumulate for potential debugging (not logged)
+        try:
+            self._val_loss_sum += float(loss.detach().cpu())
+            self._val_count += 1
+        except Exception:
+            pass
+        # log only epoch-level metrics to avoid duplication with epoch summaries
+        self.log("val/loss", loss, prog_bar=True, logger=True, on_step=False, on_epoch=True)
+        for k, v in metrics.items():
+            self.log(k, v, prog_bar=False, logger=True, on_step=False, on_epoch=True)
 
         # Additional subject-level aggregation for binary AUROC in Task 1
         if self.num_classes == 2:
@@ -198,10 +235,7 @@ class SupervisedClsModel(BaseSupervisedModel):
             except Exception:
                 pass
 
-        # Log averaged validation loss/metrics
-        if getattr(self, "_val_count", 0) > 0:
-            avg_loss = torch.tensor(self._val_loss_sum / max(self._val_count, 1), dtype=torch.float32, device=self.device)
-            self.log("val/loss_epoch", avg_loss, prog_bar=True, logger=True)
+        # Do not log duplicate val/loss at epoch end (already aggregated with on_epoch=True)
 
     def _process_batch(self, batch):
         """

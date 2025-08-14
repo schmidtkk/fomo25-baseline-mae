@@ -114,6 +114,7 @@ class BaseSupervisedModel(L.LightningModule):
             "num_classes": self.num_classes,
             "output_channels": self.num_classes,
             "deep_supervision": self.deep_supervision,
+            "starting_filters": int(self.config.get("starting_filters", 64)),
             # Applies to most CNN-based architectures
             "conv_op": conv_op,
             # Applies to most CNN-based architectures (exceptions: UXNet)
@@ -143,6 +144,50 @@ class BaseSupervisedModel(L.LightningModule):
             )
         self.model = model_class(**model_kwargs)
 
+        # Ensure classifier head dropout aligns with config even if kwargs were filtered
+        if self.task_type in ("classification", "regression"):
+            try:
+                p = float(self.config.get("cls_head_dropout_p", 0.0))
+                if hasattr(self.model, "decoder") and hasattr(self.model.decoder, "dropout"):
+                    self.model.decoder.dropout = (
+                        torch.nn.Dropout(p=p) if p and p > 0 else torch.nn.Identity()
+                    )
+            except Exception:
+                pass
+
+        # Materialize head early and run a dummy forward pass to ensure parameters are initialized
+        try:
+            if self.task_type in ("classification", "regression"):
+                # Force full model materialization with a dummy forward pass
+                patch_size = tuple(self.config.get("patch_size", (32, 32, 32)))
+                # Determine input shape based on encoder mode
+                if bool(self.config.get("use_multi_encoder", False)):
+                    # Multi-encoder expects [B, M, D, H, W]
+                    num_modalities = int(
+                        len(self.config.get("multi_encoder_modalities", []))
+                        or self.config.get("num_modalities", 1)
+                    )
+                    dummy_input = torch.zeros(1, num_modalities, *patch_size, dtype=torch.float32)
+                else:
+                    # Single-encoder expects [B, C, D, H, W]
+                    num_channels = int(self.config.get("num_modalities", 1))
+                    dummy_input = torch.zeros(1, num_channels, *patch_size, dtype=torch.float32)
+                
+                # Set model to eval mode for materialization, then back to train
+                was_training = self.model.training
+                self.model.eval()
+                
+                with torch.no_grad():
+                    _ = self.model(dummy_input)
+                
+                if was_training:
+                    self.model.train()
+                    
+                logging.info("Model parameters materialized via dummy forward pass")
+        except Exception as e:
+            logging.warning(f"Model materialization failed (may be OK): {e}")
+            pass
+
     def configure_optimizers(self):
         """Configure optimizers and learning rate schedulers"""
         # Set up task-specific loss functions
@@ -154,38 +199,73 @@ class BaseSupervisedModel(L.LightningModule):
         phase2_head_lr = float(self.config.get("phase2_head_lr", self.learning_rate))
         phase2_encoder_lr = float(self.config.get("phase2_encoder_lr", self.learning_rate))
 
-        # Parameter groups: identify encoder vs head
+        # Store freeze configuration for use in on_train_epoch_start
+        self._freeze_epochs = freeze_epochs
+        self._phase2_encoder_lr = phase2_encoder_lr
+        self._phase2_head_lr = phase2_head_lr
+        
+        # Parameter groups: identify encoder vs head parameters
         encoder_params = []
         head_params = []
+        encoder_param_names = []
+        
         for name, p in self.model.named_parameters():
-            if not p.requires_grad:
-                continue
-            if ".encoders." in name or name.startswith("encoder"):
+            if self._is_encoder_param(name):
                 encoder_params.append(p)
+                encoder_param_names.append(name)
             else:
                 head_params.append(p)
 
-        # Initial LR: freeze encoders if requested
-        if freeze_epochs > 0 and len(encoder_params) > 0:
-            for p in encoder_params:
-                p.requires_grad = False
-            param_groups = [
-                {"params": head_params, "lr": phase1_head_lr},
-            ]
-        else:
-            param_groups = [
-                {"params": encoder_params, "lr": phase2_encoder_lr},
-                {"params": head_params, "lr": phase2_head_lr},
-            ]
+        # Store encoder parameter names and objects for unfreezing
+        self._encoder_param_names = encoder_param_names
+        self._encoder_params = encoder_params
+        self._head_params = head_params
+
+        # CRITICAL: Never change requires_grad after this point
+        # Instead, we'll use zero learning rates and gradient masking
+        
+        # Create parameter groups - ALL parameters stay requires_grad=True for AMP compatibility
+        param_groups = []
+        
+        # Encoder parameters: use lr=0 during freeze phase, normal LR after
+        if len(encoder_params) > 0:
+            encoder_lr = 0.0 if freeze_epochs > 0 else phase2_encoder_lr
+            param_groups.append({
+                "params": encoder_params, 
+                "lr": encoder_lr,
+                "name": "encoder"
+            })
+            
+        # Head parameters
+        if len(head_params) > 0:
+            initial_head_lr = phase1_head_lr if freeze_epochs > 0 else phase2_head_lr
+            param_groups.append({
+                "params": head_params, 
+                "lr": initial_head_lr,
+                "name": "head"
+            })
+            
+        # Fallback: if no parameter groups created, use all parameters
+        if len(param_groups) == 0:
+            all_params = list(self.model.parameters())
+            if len(all_params) == 0:
+                raise RuntimeError("No parameters found in model")
+            initial_lr = phase1_head_lr if freeze_epochs > 0 else phase2_head_lr
+            param_groups = [{"params": all_params, "lr": initial_lr, "name": "all"}]
 
         self.optim = AdamW(
             param_groups,
-            lr=self.learning_rate,
+            lr=self.learning_rate,  # Default LR, overridden by param groups
             weight_decay=self.weight_decay,
             amsgrad=self.amsgrad,
             eps=self.eps,
             betas=self.betas,
         )
+
+        # Log the freezing strategy being used
+        if freeze_epochs > 0:
+            print(f"Using LR-based freezing: encoder LR=0 for {freeze_epochs} epochs, then LR={phase2_encoder_lr}")
+            print(f"All parameters remain requires_grad=True for AMP compatibility")
 
         # Scheduler selection
         sched_choice = str(self.config.get("lr_scheduler", "cosine"))
@@ -206,49 +286,99 @@ class BaseSupervisedModel(L.LightningModule):
                 self.optim, T_max=int(self.trainer.max_epochs * 1.15), eta_min=1e-9
             )
 
-        # Store freeze schedule in state
-        self._freeze_epochs = freeze_epochs
-        self._warmup_epochs = 5
-
         # Return the optimizer and scheduler - the loss is not returned
         if sched_choice == "plateau":
             return {
                 "optimizer": self.optim,
                 "lr_scheduler": {
                     "scheduler": self.lr_scheduler,
-                    "monitor": "val/loss_epoch",
+                    "monitor": "val/loss",
                     "interval": "epoch",
                     "frequency": 1,
                 },
             }
         return {"optimizer": self.optim, "lr_scheduler": self.lr_scheduler}
 
+    def _is_encoder_param(self, param_name: str) -> bool:
+        """
+        Determine if a parameter belongs to the encoder.
+        More robust than simple string matching.
+        """
+        encoder_indicators = [
+            ".encoders.",
+            "encoder.",
+            ".encoder.",
+            "backbone.",
+            ".backbone.",
+            "feature_extractor.",
+            ".feature_extractor.",
+        ]
+        
+        # Check for encoder indicators
+        for indicator in encoder_indicators:
+            if indicator in param_name:
+                return True
+        
+        # Check if it starts with encoder-related names
+        if param_name.startswith(("encoder", "backbone", "feature_extractor")):
+            return True
+            
+        return False
+
     def on_train_epoch_start(self):
-        # Unfreeze encoders after freeze window
+        """
+        Handle parameter unfreezing at the specified epoch.
+        Uses LR-based freezing for full AMP compatibility.
+        """
         if hasattr(self, "_freeze_epochs") and self._freeze_epochs > 0:
             if self.current_epoch == self._freeze_epochs:
-                for name, p in self.model.named_parameters():
-                    if ".encoders." in name or name.startswith("encoder"):
-                        p.requires_grad = True
-                # Adjust LRs to phase 2
-                phase2_encoder_lr = float(self.config.get("phase2_encoder_lr", self.learning_rate))
-                phase2_head_lr = float(self.config.get("phase2_head_lr", self.learning_rate))
-                # Rebuild param groups with desired LRs
-                encoder_params = []
-                head_params = []
-                for name, p in self.model.named_parameters():
-                    if not p.requires_grad:
-                        continue
-                    if ".encoders." in name or name.startswith("encoder"):
-                        encoder_params.append(p)
-                    else:
-                        head_params.append(p)
-                self.optim.param_groups.clear()
-                if len(encoder_params) > 0:
-                    self.optim.add_param_group({"params": encoder_params, "lr": phase2_encoder_lr})
-                if len(head_params) > 0:
-                    self.optim.add_param_group({"params": head_params, "lr": phase2_head_lr})
+                print(f"Unfreezing encoder parameters at epoch {self.current_epoch}")
+                
+                # Simply update learning rates - no requires_grad changes needed
+                self._update_optimizer_learning_rates()
+                
+                # Reset the freeze epochs to prevent this from running again
+                self._freeze_epochs = -1
 
+    def _update_optimizer_learning_rates(self):
+        """
+        Update learning rates in the existing optimizer without recreating it.
+        This is Lightning and AMP-compatible.
+        """
+        if not hasattr(self, "optim") or self.optim is None:
+            print("Warning: No optimizer found to update learning rates")
+            return
+            
+        print("Updating optimizer learning rates after unfreezing...")
+        
+        # Update learning rates for each parameter group
+        updated_groups = 0
+        for group in self.optim.param_groups:
+            group_name = group.get("name", "unknown")
+            
+            if group_name == "encoder":
+                # Set encoder learning rate for unfrozen parameters
+                old_lr = group["lr"]
+                group["lr"] = self._phase2_encoder_lr
+                print(f"  Updated encoder group LR: {old_lr} -> {group['lr']}")
+                updated_groups += 1
+                
+            elif group_name == "head":
+                # Update head learning rate for phase 2
+                old_lr = group["lr"]
+                group["lr"] = self._phase2_head_lr
+                print(f"  Updated head group LR: {old_lr} -> {group['lr']}")
+                updated_groups += 1
+                
+            else:
+                # Handle unnamed groups
+                old_lr = group["lr"]
+                group["lr"] = self._phase2_head_lr  # Default to head LR
+                print(f"  Updated {group_name} group LR: {old_lr} -> {group['lr']}")
+                updated_groups += 1
+        
+        print(f"Successfully updated {updated_groups} optimizer parameter groups")
+    
     def forward(self, inputs):
         """Forward pass through the model"""
         return self.model(inputs)
@@ -372,10 +502,10 @@ class BaseSupervisedModel(L.LightningModule):
                 ):
                     rejected_keys_data.append(param_name)
 
-        logging.warn(
+        logging.warning(
             f"Succesfully transferred weights for {successful}/{successful+unsuccessful} layers"
         )
-        logging.warn(
+        logging.warning(
             f"Rejected the following keys:\n"
             f"Not in old dict: {rejected_keys_new}.\n"
             f"Wrong shape: {rejected_keys_shape}.\n"

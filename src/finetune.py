@@ -28,6 +28,7 @@ from yucca.modules.data.augmentation.YuccaAugmentationComposer import (
     YuccaAugmentationComposer,
 )
 from yucca.modules.data.data_modules.YuccaDataModule import YuccaDataModule
+from data.cls_datamodule import CLSDataModule
 from yucca.modules.callbacks.loggers import YuccaLogger
 
 from yucca.pipeline.configuration.split_data import get_split_config
@@ -81,6 +82,7 @@ def main():
     )
     parser.add_argument("--precision", type=str, default="32-true")
     parser.add_argument("--patch_size", type=int, default=32)
+    parser.add_argument("--starting_filters", type=int, default=64)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--compile_mode", type=str, default=None)
@@ -133,6 +135,10 @@ def main():
     # Training Parameters
     parser.add_argument("--epochs", type=int, default=500)
     parser.add_argument("--batch_size", type=int, default=2)
+    parser.add_argument("--accumulate_grad_batches", type=int, default=1)
+    parser.add_argument("--log_every_n_steps", type=int, default=10)
+    parser.add_argument("--num_sanity_val_steps", type=int, default=0)
+    parser.add_argument("--val_batch_size", type=int, default=8)
     parser.add_argument("--train_batches_per_epoch", type=int, default=100)
     # Task Configuration
     parser.add_argument(
@@ -175,6 +181,8 @@ def main():
                         help="Number of deterministic translation offsets (center + axis shifts), max 7")
     parser.add_argument("--val_tta_offset_frac", type=float, default=0.25,
                         help="Offset as fraction of patch size along each axis (0..0.5)")
+    parser.add_argument("--val_tta_batch_size", type=int, default=8,
+                        help="Micro-batch size for TTA combos per validation step to fully utilize GPU")
     # LR scheduler
     parser.add_argument("--lr_scheduler", type=str, default="cosine", choices=["cosine", "plateau"])
     parser.add_argument("--plateau_factor", type=float, default=0.5)
@@ -205,7 +213,12 @@ def main():
     modalities = len(task_cfg["modalities"])
     labels = task_cfg["labels"]
 
-    run_type = "from_scratch" if args.pretrained_weights_path is None else "finetune"
+    # Determine run type: we consider fusion pretrain ckpts as 'finetune'
+    has_any_group_ckpt = any(
+        getattr(args, k) is not None and str(getattr(args, k)).strip() != ""
+        for k in ["t1_ckpt", "t2_ckpt", "flair_ckpt", "dwi_ckpt", "other_ckpt"]
+    )
+    run_type = "finetune" if (args.pretrained_weights_path is not None or has_any_group_ckpt or args.all_ckpt is not None) else "from_scratch"
     # Defer weight transfer decision until after fusion detection
     do_weight_transfer = False
     experiment_name = f"{run_type}_{args.experiment}_{args.taskid}"
@@ -388,8 +401,10 @@ def main():
         
         # Training parameters
         "batch_size": args.batch_size,
+        "val_batch_size": args.val_batch_size,
         "learning_rate": args.learning_rate,
         "patch_size": (args.patch_size,) * 3,
+        "starting_filters": int(args.starting_filters),
         "precision": args.precision,
         "augmentation_preset": args.augmentation_preset,
         "epochs": args.epochs,
@@ -422,6 +437,7 @@ def main():
 		"val_tta_views": int(max(1, min(8, args.val_tta_views))),
 		"val_tta_offsets": int(max(1, min(7, args.val_tta_offsets))),
 		"val_tta_offset_frac": float(max(0.0, min(0.5, args.val_tta_offset_frac))),
+		"val_tta_batch_size": int(max(1, args.val_tta_batch_size)),
 
 		# Head regularization
 		"label_smoothing": max(0.0, min(0.3, float(args.label_smoothing))),
@@ -504,6 +520,12 @@ def main():
         num_workers=args.num_workers,
         val_sampler=SequentialSampler,
     )
+    # If the YuccaDataModule exposes val_batch_size, set it when available
+    if hasattr(data_module, 'val_batch_size'):
+        try:
+            data_module.val_batch_size = max(1, int(config.get("val_batch_size", config["batch_size"])))
+        except Exception:
+            pass
     # Print dataset information
     print("Train dataset: ", data_module.splits_config.train(config["split_idx"]))
     print("Val dataset: ", data_module.splits_config.val(config["split_idx"]))
@@ -577,6 +599,9 @@ def main():
         limit_train_batches=args.train_batches_per_epoch,
         precision=args.precision,
         fast_dev_run=args.fast_dev_run,
+        log_every_n_steps=int(max(1, args.log_every_n_steps)),
+        num_sanity_val_steps=int(max(0, args.num_sanity_val_steps)),
+        accumulate_grad_batches=int(max(1, args.accumulate_grad_batches)),
         gradient_clip_val=args.grad_clip_val if args.grad_clip_val and args.grad_clip_val > 0 else 0.0,
         gradient_clip_algorithm=args.grad_clip_algo,
     )
@@ -653,7 +678,7 @@ def main():
         print("Training from scratch, no weights will be transferred")
 
     # Start training
-    trainer.fit(model=model, datamodule=data_module, ckpt_path="last")
+    trainer.fit(model=model, datamodule=data_module, ckpt_path=ckpt_path)
     # wandb.finish()
 
 

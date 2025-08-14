@@ -124,9 +124,13 @@
     --epochs 100 --batch_size 2 --num_devices 1 --num_workers 8 --new_version \
     --label_smoothing 0.05 --cls_head_dropout_p 0.2
   ```
-- Precision:
-  - If BF16 unsupported, add `--precision 16-mixed`.
-  - To stabilize training on few-shot, enable gradient clipping, for example: `--grad_clip_val 1.0 --grad_clip_algo norm`.
+- Precision and Freezing:
+   - Prefer `--precision bf16-mixed` if supported; else use `--precision 16-mixed`. For debugging, use `--precision 32-true`.
+   - If you freeze encoders with `--freeze_encoder_epochs > 0`, mixed precision can assert if no gradients are seen by AMP early. The simplest workaround is to set `--freeze_encoder_epochs 0` when using AMP.
+   - Set `--num_sanity_val_steps 0` to avoid mixed-precision quirks during the sanity check.
+   - If you use `--lr_scheduler plateau`, the monitored metric is `val/loss`.
+   - Use `--log_every_n_steps 1` and `--accumulate_grad_batches` when training batch size must be 1.
+   - To stabilize training on few-shot, enable gradient clipping, for example: `--grad_clip_val 1.0 --grad_clip_algo norm`.
 
 ### K-Fold controls and metrics (Task 1)
 - Set total folds and current fold via `--k_folds K` and `--fold_index f` (0-based). Splits are stratified at subject level in fusion mode.

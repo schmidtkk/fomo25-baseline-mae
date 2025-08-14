@@ -34,6 +34,7 @@ class UNet(YuccaNet):
         multi_encoder_num_modalities_global: int | None = None,
         modality_to_global_group: dict | None = None,
         global_vocab: list[str] | None = None,
+        cls_head_dropout_p: float = 0.0,
     ):
         super().__init__()
 
@@ -80,10 +81,12 @@ class UNet(YuccaNet):
                 starting_filters=starting_filters,
             )
         elif mode in ["classification", "regression"]:
+            # The encoder bottleneck channels equal starting_filters * 16
+            head_in = int(starting_filters * 16)
             self.decoder = ClsRegHead(
-                in_channels=starting_filters * 16,
+                in_channels=head_in,
                 num_classes=output_channels,
-                dropout_p=float(getattr(self, "cls_head_dropout_p", 0.0)) if hasattr(self, "cls_head_dropout_p") else 0.0,
+                dropout_p=float(cls_head_dropout_p),
             )
         elif mode == "enc":
             self.decoder = nn.Identity()

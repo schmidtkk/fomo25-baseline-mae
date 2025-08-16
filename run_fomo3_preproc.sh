@@ -1,10 +1,7 @@
-#!/usr/bin/env bash
-set -euo pipefail
-
 # Paths
-REPO_DIR="/mnt/cvlab/scratch/cvlab/home/hantzhan/code/fomo25-baseline-mae-main"
-SOURCE_DIR="/mnt/cvlab/scratch/cvlab/home/hantzhan/data/FOMO-MRI/fomo-finetune/fomo-task3"
-OUTPUT_DIR="/mnt/cvlab/scratch/cvlab/home/hantzhan/data/FOMO-MRI/fomo-finetune"
+REPO_DIR="/home/weidongguo/workspace/fomo2025/baseline-codebase-main"
+SOURCE_DIR="/data/weidong/fomo_finetune/fomo-task3"
+OUTPUT_DIR="/data/weidong/fomo-finetune"
 NUM_WORKERS="${NUM_WORKERS:-$(nproc)}"
 
 # Activate env

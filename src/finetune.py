@@ -19,6 +19,12 @@ from utils.utils import (
     find_checkpoint,
     load_pretrained_weights,
 )
+from utils.enhanced_callbacks import (
+    EnhancedModelCheckpoint,
+    LossPlottingCallback,
+    MetricsStabilityCallback,
+    SmoothLoggingCallback,
+)
 
 from batchgenerators.utilities.file_and_folder_operations import (
     maybe_mkdir_p as ensure_dir_exists,
@@ -108,6 +114,30 @@ def main():
         default=None,
         help="Comma-separated mapping finetuneMod=pretrainGroup, e.g. DWI=dwi,ADC=dwi,T2FLAIR=flair,SWI_OR_T2STAR=other",
     )
+    # Modality enable/disable switches
+    parser.add_argument(
+        "--enabled_modalities",
+        type=str,
+        default=None,
+        help="Comma-separated list of modalities to enable (e.g., 'DWI,ADC'). If not specified, all modalities are enabled.",
+    )
+    parser.add_argument(
+        "--disabled_modalities", 
+        type=str,
+        default=None,
+        help="Comma-separated list of modalities to disable. Mutually exclusive with --enabled_modalities.",
+    )
+    # Fusion mechanism options
+    parser.add_argument(
+        "--fusion_type",
+        type=str,
+        choices=[
+            "masked_mean", "attention", "channel_attention", "spatial_attention", "hybrid_attention",
+            "learnable_weighted", "channel_gated", "uncertainty_weighted"
+        ],
+        default="masked_mean",
+        help="Type of fusion mechanism to use between modalities",
+    )
     parser.add_argument("--allow_missing_modalities", action="store_true")
     parser.add_argument("--modality_dropout_p_start", type=float, default=0.2)
     parser.add_argument("--modality_dropout_p_end", type=float, default=0.5)
@@ -137,6 +167,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--accumulate_grad_batches", type=int, default=1)
     parser.add_argument("--log_every_n_steps", type=int, default=10)
+    parser.add_argument("--smoothing_window", type=int, default=10, help="Window size for loss smoothing (1 to disable)")
     parser.add_argument("--num_sanity_val_steps", type=int, default=0)
     parser.add_argument("--val_batch_size", type=int, default=8)
     parser.add_argument("--train_batches_per_epoch", type=int, default=100)
@@ -173,6 +204,17 @@ def main():
     # Classification head regularization
     parser.add_argument("--label_smoothing", type=float, default=0.0)
     parser.add_argument("--cls_head_dropout_p", type=float, default=0.0)
+    
+    # Regression-specific parameters for brain age prediction
+    parser.add_argument("--loss_type", type=str, default="mse", choices=["mse", "mae", "huber"],
+                        help="Loss function for regression (mae recommended for brain age)")
+    parser.add_argument("--age_normalization", action="store_true", default=False,
+                        help="Normalize age values for stable training (recommended)")
+    parser.add_argument("--age_mean", type=float, default=50.0,
+                        help="Mean age for normalization (default: 50 years)")
+    parser.add_argument("--age_std", type=float, default=15.0,
+                        help="Age standard deviation for normalization (default: 15 years)")
+    
     # Validation/Test-time augmentation (multi-view averaging)
     parser.add_argument("--val_tta_enable", action="store_true")
     parser.add_argument("--val_tta_views", type=int, default=8,
@@ -252,11 +294,42 @@ def main():
     # Path where logs, checkpoints etc is stored
     save_dir = os.path.join(args.save_dir, task_name, args.model_name)
 
-    # Handle versioning for experiment tracking
+    # Handle versioning for experiment tracking with meaningful names
     continue_from_most_recent = not args.new_version
-    version = detect_version(save_dir, continue_from_most_recent)
-    version_dir = os.path.join(save_dir, f"version_{version}")
+    
+    # Create experiment-specific directory structure
+    experiment_name = args.experiment if args.experiment else "default_experiment"
+    
+    # Clean experiment name for filesystem compatibility
+    import re
+    clean_experiment_name = re.sub(r'[^\w\-_\.]', '_', experiment_name)
+    
+    # Build hierarchical directory: save_dir/experiment_name/version_X
+    experiment_dir = os.path.join(save_dir, clean_experiment_name)
+    
+    if continue_from_most_recent and os.path.exists(experiment_dir):
+        # Continue existing experiment
+        version = detect_version(experiment_dir, continue_from_most_recent)
+        version_dir = os.path.join(experiment_dir, f"version_{version}")
+    else:
+        # New experiment or forced new version
+        if os.path.exists(experiment_dir):
+            # Experiment exists, create new version
+            version = detect_version(experiment_dir, False)  # Force new version
+        else:
+            # First run of this experiment
+            version = 0
+        version_dir = os.path.join(experiment_dir, f"version_{version}")
+    
     ensure_dir_exists(version_dir)
+    
+    # Log the experiment structure
+    print(f"🧪 Experiment Structure:")
+    print(f"   📁 Base: {save_dir}")
+    print(f"   🏷️  Experiment: {clean_experiment_name}")
+    print(f"   📊 Version: {version}")
+    print(f"   📂 Full path: {version_dir}")
+    print("")
 
     # Create dataset splits
     if args.split_method == "kfold":
@@ -276,20 +349,29 @@ def main():
         assert len(subject_dirs) > 0, f"No subject directories found in fusion dir: {fusion_dir}"
 
         # Read labels for stratification
-        def read_label(subj_dir: str) -> int:
+        def read_label(subj_dir: str) -> float:
             path = os.path.join(subj_dir, "label.txt")
-            return int(float(open(path, "r").read().strip()))
+            return float(open(path, "r").read().strip())
 
         labels = [read_label(sd) for sd in subject_dirs]
 
         import random
         rnd = random.Random(2025)
 
-        # Stratified split: separate by class, shuffle deterministically, then interleave folds
-        pos = [sd for sd, y in zip(subject_dirs, labels) if y == 1]
-        neg = [sd for sd, y in zip(subject_dirs, labels) if y == 0]
-        rnd.shuffle(pos)
-        rnd.shuffle(neg)
+        # Task-type aware splitting strategy
+        if task_type == "regression":
+            # For regression: simple random split (no stratification needed for continuous labels)
+            combined = list(zip(subject_dirs, labels))
+            rnd.shuffle(combined)
+            subject_dirs_shuffled = [sd for sd, _ in combined]
+            pos = subject_dirs_shuffled  # Use all data as "positive" for unified logic below
+            neg = []  # Empty negative class for regression
+        else:
+            # For classification: stratified split by binary classes
+            pos = [sd for sd, y in zip(subject_dirs, labels) if int(y) == 1]
+            neg = [sd for sd, y in zip(subject_dirs, labels) if int(y) == 0]
+            rnd.shuffle(pos)
+            rnd.shuffle(neg)
 
         def make_kfolds(items: list, k: int) -> list[list]:
             return [items[i::k] for i in range(k)] if k > 0 else [items]
@@ -443,6 +525,12 @@ def main():
 		"label_smoothing": max(0.0, min(0.3, float(args.label_smoothing))),
 		"cls_head_dropout_p": max(0.0, min(0.8, float(args.cls_head_dropout_p))),
 
+		# Regression-specific parameters for brain age
+		"loss_type": str(args.loss_type),
+		"age_normalization": bool(args.age_normalization),
+		"age_mean": float(args.age_mean),
+		"age_std": float(args.age_std),
+
 		# LR scheduler
 		"lr_scheduler": str(args.lr_scheduler),
 		"plateau_factor": float(args.plateau_factor),
@@ -459,22 +547,63 @@ def main():
         "fast_dev_run": args.fast_dev_run,
     }
 
-    # Choose monitor metric
-    monitor_metric = "val/loss"
-    monitor_mode = "min"
+    # Choose monitor metric based on task type
     if task_type == "classification" and num_classes == 2:
         monitor_metric = "val/auroc_subject"
         monitor_mode = "max"
+    elif task_type == "regression":
+        monitor_metric = "val/corr"  # Use correlation for brain age regression
+        monitor_mode = "max"
+    else:
+        monitor_metric = "val/loss"
+        monitor_mode = "min"
 
-    # Checkpoint and early stopping callbacks
-    checkpoint_callback = ModelCheckpoint(
+    # Enhanced checkpoint callback with terminal feedback
+    checkpoint_callback = EnhancedModelCheckpoint(
         monitor=monitor_metric,
         mode=monitor_mode,
         save_top_k=1,
         filename="best",
         enable_version_counter=False,
     )
-    callbacks = [checkpoint_callback]
+    
+    # Loss plotting callback that shares log_every_n_steps parameter
+    loss_plotting_callback = LossPlottingCallback(
+        save_dir=version_dir,
+        log_every_n_steps=args.log_every_n_steps,
+        plot_every_n_epochs=1,  # Save plots every epoch
+        smoothing_window=args.smoothing_window     # Window size for moving average smoothing
+    )
+    
+    # Metrics stability callback for better monitoring
+    if task_type == "classification" and num_classes == 2:
+        # Use AUROC monitoring for binary classification
+        metrics_stability_callback = MetricsStabilityCallback(
+            window_size=5, 
+            primary_metric="val/auroc_subject"
+        )
+    else:
+        # Use accuracy monitoring for classification, correlation for regression
+        if task_type == "classification":
+            primary_metric = "val/accuracy"
+        elif task_type == "regression":
+            # Align with checkpoint monitor and logged key from model
+            primary_metric = "val/corr"
+        else:
+            primary_metric = "val/loss"  # Fallback
+            
+        metrics_stability_callback = MetricsStabilityCallback(
+            window_size=5, 
+            primary_metric=primary_metric
+        )
+    
+    # Smooth logging callback for console output
+    smooth_logging_callback = SmoothLoggingCallback(
+        smoothing_window=args.smoothing_window
+    )
+    
+    callbacks = [checkpoint_callback, loss_plotting_callback, metrics_stability_callback, smooth_logging_callback]
+    
     if not args.disable_early_stop:
         early_stop = EarlyStopping(
             monitor=monitor_metric,
@@ -486,18 +615,43 @@ def main():
 
     # Create logger for metrics
     yucca_logger = YuccaLogger(
-        save_dir=save_dir,
+        save_dir=experiment_dir,
         version=version,
         steps_per_epoch=args.train_batches_per_epoch,
     )
     loggers = [yucca_logger]
 
+    # Display quality enhancement features
+    print("📊 Quality Enhancement Features Enabled:")
+    print("   ✅ Enhanced checkpoint feedback with terminal prompts")
+    print("   ✅ Real-time loss plotting with shared log_every_n_steps")
+    if task_type == "classification" and num_classes == 2:
+        print("   ✅ AUROC stability monitoring for binary classification")
+        print(f"   📈 Best checkpoints will be saved based on: {monitor_metric}")
+    elif task_type == "classification":
+        print("   ✅ Accuracy stability monitoring for multi-class classification")
+        print(f"   📈 Best checkpoints will be saved based on: {monitor_metric}")
+    elif task_type == "regression":
+        print("   ✅ Pearson correlation monitoring (val/corr) for brain age regression")
+        print(f"   📈 Best checkpoints will be saved based on: {monitor_metric}")
+        print("   🧠 Enhanced metrics: MAE and Pearson Correlation")
+    else:
+        print("   ✅ Loss stability monitoring for other tasks")
+        print(f"   📈 Best checkpoints will be saved based on: {monitor_metric}")
+    print(f"   📊 Training progress plots will be saved to: {version_dir}")
+    print(f"   🔄 Metrics logged every {args.log_every_n_steps} steps")
+    print("")
+
 
     # Configure augmentations based on preset
     aug_params = get_finetune_augmentation_params(args.augmentation_preset)
+    
+    # Map task type for augmentation composer (regression uses same augmentations as classification)
+    aug_task_type = "classification" if task_type in ["classification", "regression"] else task_type
+    
     augmenter = YuccaAugmentationComposer(
         patch_size=config["patch_size"],
-        task_type_preset=task_type,
+        task_type_preset=aug_task_type,
         parameter_dict=aug_params,
         deep_supervision=False,
     )
@@ -554,7 +708,42 @@ def main():
     # If fusion mode, include modality names and group mapping in config to build the wrapper
     if use_fusion:
         finetune_modalities = list(task_cfg["modalities"])  # e.g., FOMO1
+        
+        # Handle modality enable/disable switches
+        enabled_modalities = None
+        if args.enabled_modalities is not None and args.disabled_modalities is not None:
+            raise ValueError("Cannot specify both --enabled_modalities and --disabled_modalities")
+        
+        if args.enabled_modalities is not None:
+            enabled_modalities = [m.strip() for m in args.enabled_modalities.split(",") if m.strip()]
+            # Validate enabled modalities
+            invalid = set(enabled_modalities) - set(finetune_modalities)
+            if invalid:
+                raise ValueError(f"Invalid enabled modalities: {invalid}. Available: {finetune_modalities}")
+        
+        if args.disabled_modalities is not None:
+            disabled_modalities = [m.strip() for m in args.disabled_modalities.split(",") if m.strip()]
+            # Validate disabled modalities
+            invalid = set(disabled_modalities) - set(finetune_modalities)
+            if invalid:
+                raise ValueError(f"Invalid disabled modalities: {invalid}. Available: {finetune_modalities}")
+            enabled_modalities = [m for m in finetune_modalities if m not in disabled_modalities]
+            if len(enabled_modalities) == 0:
+                raise ValueError("Cannot disable all modalities")
+        
         config["multi_encoder_modalities"] = finetune_modalities
+        config["enabled_modalities"] = enabled_modalities  # None means all enabled
+        config["fusion_type"] = args.fusion_type
+        
+        print(f"🧬 Modality configuration:")
+        print(f"   Available modalities: {finetune_modalities}")
+        if enabled_modalities is not None:
+            print(f"   Enabled modalities: {enabled_modalities}")
+            print(f"   Disabled modalities: {[m for m in finetune_modalities if m not in enabled_modalities]}")
+        else:
+            print(f"   All modalities enabled by default")
+        print(f"   Fusion type: {args.fusion_type}")
+        
         default_mapping = {
             # FOMO1 canonical
             "DWI": "dwi",
@@ -586,6 +775,26 @@ def main():
         compile_mode="default" if args.compile_mode is None else args.compile_mode,
     )
 
+    # Display accurate parameter counts considering freeze strategy
+    print("\n📊 Model Parameter Summary:")
+    print("=" * 50)
+    if hasattr(model, 'get_effective_parameter_counts'):
+        counts = model.get_effective_parameter_counts()
+        if counts['freeze_active']:
+            print(f"🔒 Effectively FROZEN: {counts['frozen']:,} encoder parameters (LR=0)")
+            print(f"🔓 Actively TRAINING: {counts['trainable']:,} head parameters")
+            print(f"📝 Total Parameters: {counts['total']:,}")
+            print(f"💾 Estimated Model Size: {counts['total'] * 4 / 1024**2:.1f} MB (fp32)")
+            print(f"")
+            print(f"⚠️  Note: PyTorch Lightning will report all {counts['total']:,} as 'trainable'")
+            print(f"   because requires_grad=True (needed for mixed precision),")
+            print(f"   but {counts['frozen']:,} encoder params have LR=0 and won't update.")
+        else:
+            print(f"🔓 All TRAINABLE: {counts['trainable']:,} parameters")
+            print(f"💾 Estimated Model Size: {counts['total'] * 4 / 1024**2:.1f} MB (fp32)")
+    print("=" * 50)
+    print("")
+
     # Create Lightning trainer
     trainer = L.Trainer(
         callbacks=callbacks,
@@ -594,7 +803,7 @@ def main():
         strategy="auto",
         num_nodes=1,
         devices=args.num_devices,
-        default_root_dir=save_dir,
+        default_root_dir=experiment_dir,
         max_epochs=args.epochs,
         limit_train_batches=args.train_batches_per_epoch,
         precision=args.precision,

@@ -34,6 +34,8 @@ class UNet(YuccaNet):
         multi_encoder_num_modalities_global: int | None = None,
         modality_to_global_group: dict | None = None,
         global_vocab: list[str] | None = None,
+        enabled_modalities: list[str] | None = None,
+        fusion_type: str = "masked_mean",
         cls_head_dropout_p: float = 0.0,
     ):
         super().__init__()
@@ -54,6 +56,8 @@ class UNet(YuccaNet):
                 num_modalities_global=multi_encoder_num_modalities_global,
                 modality_to_global_group=modality_to_global_group,
                 global_vocab=global_vocab,
+                enabled_modalities=enabled_modalities,
+                fusion_type=fusion_type,
             )
         else:
             self.encoder = UNetEncoder(

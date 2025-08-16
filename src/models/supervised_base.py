@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Dict, List
 import torch
 from torch.optim import AdamW
 import copy
@@ -133,6 +133,9 @@ class BaseSupervisedModel(L.LightningModule):
             multi_modalities = list(self.config.get("multi_encoder_modalities", []))
             modality_to_global_group = dict(self.config.get("modality_to_global_group", {}))
             global_vocab = list(self.config.get("global_vocab", ["t1","t2","flair","dwi","other"]))
+            enabled_modalities = self.config.get("enabled_modalities", None)  # None means all enabled
+            fusion_type = str(self.config.get("fusion_type", "masked_mean"))
+            
             model_kwargs.update(
                 {
                     "use_multi_encoder": True,
@@ -140,6 +143,8 @@ class BaseSupervisedModel(L.LightningModule):
                     "multi_encoder_num_modalities_global": len(multi_modalities) if len(multi_modalities) > 0 else None,
                     "modality_to_global_group": modality_to_global_group,
                     "global_vocab": global_vocab,
+                    "enabled_modalities": enabled_modalities,
+                    "fusion_type": fusion_type,
                 }
             )
         self.model = model_class(**model_kwargs)
@@ -199,8 +204,18 @@ class BaseSupervisedModel(L.LightningModule):
         phase2_head_lr = float(self.config.get("phase2_head_lr", self.learning_rate))
         phase2_encoder_lr = float(self.config.get("phase2_encoder_lr", self.learning_rate))
 
+        # Check for potential AMP + freeze incompatibility
+        precision = str(self.config.get("precision", "")).strip()
+        if freeze_epochs > 0 and precision == "16-mixed":
+            logging.warning(
+                "⚠️  COMPATIBILITY WARNING: freeze_encoder_epochs > 0 with 16-mixed precision "
+                "may cause AMP assertion failures. Consider using bf16-mixed, 32-true, "
+                "or setting freeze_encoder_epochs=0 if training crashes."
+            )
+
         # Store freeze configuration for use in on_train_epoch_start
         self._freeze_epochs = freeze_epochs
+        self._phase1_head_lr = phase1_head_lr
         self._phase2_encoder_lr = phase2_encoder_lr
         self._phase2_head_lr = phase2_head_lr
         
@@ -262,10 +277,26 @@ class BaseSupervisedModel(L.LightningModule):
             betas=self.betas,
         )
 
-        # Log the freezing strategy being used
+        # Log the freezing strategy being used with accurate parameter counts
         if freeze_epochs > 0:
-            print(f"Using LR-based freezing: encoder LR=0 for {freeze_epochs} epochs, then LR={phase2_encoder_lr}")
-            print(f"All parameters remain requires_grad=True for AMP compatibility")
+            frozen_params = len(encoder_params)
+            trainable_params = len(head_params) 
+            total_params = frozen_params + trainable_params
+            
+            logging.info(f"🔒 Freeze strategy: encoder LR=0 for {freeze_epochs} epochs, then LR={phase2_encoder_lr}")
+            logging.info(f"📌 Head LR: phase1={phase1_head_lr}, phase2={phase2_head_lr}")
+            logging.info(f"🧠 All parameters remain requires_grad=True for AMP compatibility")
+            logging.info(f"")
+            logging.info(f"📊 EFFECTIVE Parameter Status During Freeze Phase:")
+            logging.info(f"   {frozen_params:,} encoder params (LR=0, effectively frozen)")
+            logging.info(f"   {trainable_params:,} head params (LR={phase1_head_lr}, actively training)")
+            logging.info(f"   {total_params:,} total params")
+            logging.info(f"")
+            logging.info(f"   Note: PyTorch Lightning reports all {total_params:,} as 'trainable'")
+            logging.info(f"   because requires_grad=True (needed for mixed precision),")
+            logging.info(f"   but {frozen_params:,} encoder params have LR=0 so won't update.")
+        else:
+            logging.info(f"🔓 No encoder freezing - all parameters trainable from start")
 
         # Scheduler selection
         sched_choice = str(self.config.get("lr_scheduler", "cosine"))
@@ -302,16 +333,17 @@ class BaseSupervisedModel(L.LightningModule):
     def _is_encoder_param(self, param_name: str) -> bool:
         """
         Determine if a parameter belongs to the encoder.
-        More robust than simple string matching.
+        Enhanced for multi-encoder and fusion architectures.
         """
         encoder_indicators = [
-            ".encoders.",
-            "encoder.",
-            ".encoder.",
-            "backbone.",
-            ".backbone.",
-            "feature_extractor.",
-            ".feature_extractor.",
+            ".encoders.",         # Multi-encoder: model.encoder.encoders.DWI.*
+            ".fusions.",          # Fusion layers: model.encoder.fusions.*
+            "encoder.",           # Standard: encoder.*
+            ".encoder.",          # Standard: model.encoder.*
+            "backbone.",          # Backbone: backbone.*
+            ".backbone.",         # Backbone: model.backbone.*
+            "feature_extractor.", # Feature extractor: feature_extractor.*
+            ".feature_extractor.",# Feature extractor: model.feature_extractor.*
         ]
         
         # Check for encoder indicators
@@ -332,24 +364,43 @@ class BaseSupervisedModel(L.LightningModule):
         """
         if hasattr(self, "_freeze_epochs") and self._freeze_epochs > 0:
             if self.current_epoch == self._freeze_epochs:
-                print(f"Unfreezing encoder parameters at epoch {self.current_epoch}")
+                logging.info(f"🔓 UNFREEZING encoders at epoch {self.current_epoch}")
+                logging.info(f"📈 Encoder LR: 0 -> {self._phase2_encoder_lr}")
+                
+                # Safely log head LR transition if both values are available
+                if hasattr(self, "_phase1_head_lr") and hasattr(self, "_phase2_head_lr"):
+                    logging.info(f"📈 Head LR: {self._phase1_head_lr} -> {self._phase2_head_lr}")
+                else:
+                    logging.info(f"📈 Head LR updated to: {getattr(self, '_phase2_head_lr', 'unknown')}")
                 
                 # Simply update learning rates - no requires_grad changes needed
                 self._update_optimizer_learning_rates()
                 
+                # Log the new effective parameter status
+                self.log_effective_parameter_status()
+                
                 # Reset the freeze epochs to prevent this from running again
                 self._freeze_epochs = -1
-
+            elif self.current_epoch < self._freeze_epochs:
+                if self.current_epoch % 5 == 0 or self.current_epoch == 0:  # Log at start and every 5 epochs
+                    logging.info(f"🔒 Encoders frozen (epoch {self.current_epoch}/{self._freeze_epochs})")
+                    if self.current_epoch == 0:
+                        self.log_effective_parameter_status()
+    
     def _update_optimizer_learning_rates(self):
         """
         Update learning rates in the existing optimizer without recreating it.
         This is Lightning and AMP-compatible.
         """
         if not hasattr(self, "optim") or self.optim is None:
-            print("Warning: No optimizer found to update learning rates")
+            logging.warning("⚠️  No optimizer found to update learning rates")
             return
             
-        print("Updating optimizer learning rates after unfreezing...")
+        logging.info("🔄 Updating optimizer learning rates after unfreezing...")
+        
+        # Get target learning rates with safety checks
+        target_encoder_lr = getattr(self, '_phase2_encoder_lr', 1e-5)
+        target_head_lr = getattr(self, '_phase2_head_lr', 1e-4)
         
         # Update learning rates for each parameter group
         updated_groups = 0
@@ -359,25 +410,25 @@ class BaseSupervisedModel(L.LightningModule):
             if group_name == "encoder":
                 # Set encoder learning rate for unfrozen parameters
                 old_lr = group["lr"]
-                group["lr"] = self._phase2_encoder_lr
-                print(f"  Updated encoder group LR: {old_lr} -> {group['lr']}")
+                group["lr"] = target_encoder_lr
+                logging.info(f"  ✅ Encoder group LR: {old_lr} -> {group['lr']}")
                 updated_groups += 1
                 
             elif group_name == "head":
                 # Update head learning rate for phase 2
                 old_lr = group["lr"]
-                group["lr"] = self._phase2_head_lr
-                print(f"  Updated head group LR: {old_lr} -> {group['lr']}")
+                group["lr"] = target_head_lr
+                logging.info(f"  ✅ Head group LR: {old_lr} -> {group['lr']}")
                 updated_groups += 1
                 
             else:
-                # Handle unnamed groups
+                # Handle unnamed groups - use head LR as default
                 old_lr = group["lr"]
-                group["lr"] = self._phase2_head_lr  # Default to head LR
-                print(f"  Updated {group_name} group LR: {old_lr} -> {group['lr']}")
+                group["lr"] = target_head_lr
+                logging.info(f"  ✅ {group_name} group LR: {old_lr} -> {group['lr']} (defaulted to head LR)")
                 updated_groups += 1
         
-        print(f"Successfully updated {updated_groups} optimizer parameter groups")
+        logging.info(f"✅ Successfully updated {updated_groups} optimizer parameter groups")
     
     def forward(self, inputs):
         """Forward pass through the model"""
@@ -393,15 +444,23 @@ class BaseSupervisedModel(L.LightningModule):
         inputs, target, _ = self._process_batch(batch)
 
         output = self(inputs)
+        
+        # Fix tensor shape mismatch for regression tasks
+        if output.dim() > 1 and output.size(-1) == 1:
+            output = output.squeeze(-1)
+            
         loss = self.loss_fn_train(output, target)
 
         if self.deep_supervision and hasattr(output, "__iter__"):
             # If deep_supervision is enabled, output and target will be a list of (downsampled) tensors.
             # We only need the original ground truth and its corresponding prediction which is always the first entry in each list.
-            output = output[0]
-            target = target[0]
+            output_for_metrics = output[0]
+            target_for_metrics = target[0]
+        else:
+            output_for_metrics = output
+            target_for_metrics = target
 
-        metrics = self.compute_metrics(self.train_metrics, output, target)
+        metrics = self.compute_metrics(self.train_metrics, output_for_metrics, target_for_metrics)
         self.log_dict(
             {"train/loss": loss} | metrics,
             prog_bar=self.progress_bar,
@@ -415,8 +474,22 @@ class BaseSupervisedModel(L.LightningModule):
         inputs, target, _ = self._process_batch(batch)
 
         output = self(inputs)
+        
+        # Fix tensor shape mismatch for regression tasks
+        if output.dim() > 1 and output.size(-1) == 1:
+            output = output.squeeze(-1)
+            
         loss = self.loss_fn_val(output, target)
-        metrics = self.compute_metrics(self.val_metrics, output, target)
+        
+        # Handle deep supervision for metrics
+        if self.deep_supervision and hasattr(output, "__iter__"):
+            output_for_metrics = output[0]
+            target_for_metrics = target[0]
+        else:
+            output_for_metrics = output
+            target_for_metrics = target
+            
+        metrics = self.compute_metrics(self.val_metrics, output_for_metrics, target_for_metrics)
         self.log_dict(
             {"val/loss": loss} | metrics,
             prog_bar=self.progress_bar,
@@ -513,6 +586,98 @@ class BaseSupervisedModel(L.LightningModule):
         )
 
         return successful
+
+    def set_enabled_modalities(self, enabled_modalities: List[str]) -> None:
+        """
+        Dynamically enable/disable modalities for ablation studies.
+        Only works for multi-encoder models.
+        
+        Args:
+            enabled_modalities: List of modality names to enable
+        """
+        if not hasattr(self.model, 'encoder') or not hasattr(self.model.encoder, 'set_enabled_modalities'):
+            raise ValueError("Model does not support modality switching (not a multi-encoder model)")
+        
+        self.model.encoder.set_enabled_modalities(enabled_modalities)
+        
+    def get_modality_status(self) -> Dict[str, bool]:
+        """
+        Get current enable/disable status of all modalities.
+        Only works for multi-encoder models.
+        
+        Returns:
+            Dictionary mapping modality names to their enabled status
+        """
+        if not hasattr(self.model, 'encoder') or not hasattr(self.model.encoder, 'get_modality_status'):
+            raise ValueError("Model does not support modality switching (not a multi-encoder model)")
+        
+        return self.model.encoder.get_modality_status()
+    
+    def enable_modality(self, modality_name: str) -> None:
+        """Enable a specific modality."""
+        if not hasattr(self.model, 'encoder') or not hasattr(self.model.encoder, 'enable_modality'):
+            raise ValueError("Model does not support modality switching (not a multi-encoder model)")
+        
+        self.model.encoder.enable_modality(modality_name)
+    
+    def disable_modality(self, modality_name: str) -> None:
+        """Disable a specific modality."""
+        if not hasattr(self.model, 'encoder') or not hasattr(self.model.encoder, 'disable_modality'):
+            raise ValueError("Model does not support modality switching (not a multi-encoder model)")
+        
+        self.model.encoder.disable_modality(modality_name)
+    
+    def get_effective_parameter_counts(self) -> Dict[str, int]:
+        """
+        Get accurate parameter counts considering current freeze state.
+        
+        Returns:
+            Dictionary with 'frozen', 'trainable', and 'total' parameter counts
+        """
+        if not hasattr(self, '_freeze_epochs') or self._freeze_epochs <= 0:
+            # No freezing active
+            total = sum(p.numel() for p in self.parameters())
+            return {
+                'frozen': 0,
+                'trainable': total,
+                'total': total,
+                'freeze_active': False
+            }
+        
+        # During freeze phase
+        if self.current_epoch < self._freeze_epochs:
+            encoder_count = sum(p.numel() for p in getattr(self, '_encoder_params', []))
+            head_count = sum(p.numel() for p in getattr(self, '_head_params', []))
+            return {
+                'frozen': encoder_count,
+                'trainable': head_count, 
+                'total': encoder_count + head_count,
+                'freeze_active': True
+            }
+        else:
+            # After unfreezing
+            total = sum(p.numel() for p in self.parameters())
+            return {
+                'frozen': 0,
+                'trainable': total,
+                'total': total,
+                'freeze_active': False
+            }
+    
+    def log_effective_parameter_status(self) -> None:
+        """Log current effective parameter status with clear explanation."""
+        counts = self.get_effective_parameter_counts()
+        
+        if counts['freeze_active']:
+            logging.info(f"📊 Current Effective Parameter Status:")
+            logging.info(f"   🔒 {counts['frozen']:,} params effectively FROZEN (encoder, LR=0)")
+            logging.info(f"   🔓 {counts['trainable']:,} params actively TRAINING (head, LR>0)")
+            logging.info(f"   📝 Total: {counts['total']:,} params")
+            logging.info(f"   ⚡ Note: All params have requires_grad=True for AMP, but frozen params won't update")
+        else:
+            logging.info(f"📊 Current Parameter Status:")
+            logging.info(f"   🔓 {counts['trainable']:,} params actively TRAINING")
+            logging.info(f"   📝 Total: {counts['total']:,} params")
 
     @staticmethod
     def create(task_type, config, **kwargs):

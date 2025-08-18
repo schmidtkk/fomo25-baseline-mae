@@ -1,0 +1,41 @@
+# Container requirements for FOMO25 inference
+# Optimized for production deployment with minimal dependencies
+
+# Core ML framework
+torch>=2.0.0,<2.3.0
+torchvision>=0.15.0
+
+# Lightning for model loading
+lightning>=2.1.4
+
+# Medical imaging
+nibabel>=5.0.0
+SimpleITK>=2.2.0
+
+# Core scientific computing  
+numpy>=1.23,<2.0
+scipy>=1.9.0
+
+# Image processing
+opencv-python>=4.8.0
+Pillow>=9.0.0
+
+# Data handling
+h5py>=3.8.0
+pandas>=1.5.0
+
+# Medical imaging preprocessing (yucca)
+yucca==2.2.6
+
+# Utilities
+einops>=0.7.0
+tqdm>=4.64.0
+
+# Optional: Accelerated inference
+# onnx>=1.14.0
+# onnxruntime-gpu>=1.15.0  # For ONNX acceleration
+
+# Development/debugging (remove for production)
+# matplotlib>=3.6.0
+# seaborn>=0.12.0
+# ipython>=8.0.0

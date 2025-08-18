@@ -1,0 +1,137 @@
+Bootstrap: docker
+
+# Use CUDA-enabled PyTorch base image for optimal performance
+From: pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime
+
+%labels
+    Author FOMO25 Challenge - Baseline Codebase
+    Version v1.0.0
+    Description FOMO25 Task 1 Infarct Detection Inference Container
+    Task Task001_FOMO1
+
+%environment
+    export PYTHONUNBUFFERED=1
+    export LC_ALL=C.UTF-8
+    export CUDA_VISIBLE_DEVICES=0
+
+%files
+    # Copy the entire source code structure
+    ./src /app/src
+    
+    # Copy inference-specific requirements
+    ./src/inference/container_requirements.txt /app/requirements.txt
+    
+    # Copy task 1 specific inference script as main predict.py
+    ./src/inference/predict_task1.py /app/predict.py
+    
+    # ----> CHECKPOINT CONFIGURATION <----
+    # Using the best available checkpoint from our testing
+    ./runs/Task001_FOMO1/unet_xl/fomo1_optimized_baseline/version_0/checkpoints/best.ckpt /app/model.ckpt
+    
+    # Optional: Copy additional checkpoints for ensemble inference
+    # ./runs/Task001_FOMO1/unet_xl/XXX_fomo1_lightweight_fusion_v2/version_2/checkpoints/best.ckpt /app/ensemble_model_2.ckpt
+    # ./runs/Task001_FOMO1/unet_xl/ablation_dwi_adc_chanatt/version_0/checkpoints/best.ckpt /app/ensemble_model_3.ckpt
+
+%post
+    # Create necessary directories
+    mkdir -p /input /output /app
+
+    # Update system packages
+    apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        git \
+        && rm -rf /var/lib/apt/lists/*
+
+    # Install Python dependencies
+    pip install --no-cache-dir -U pip setuptools wheel
+    pip install --no-cache-dir -r /app/requirements.txt
+    
+    # Install the source code as a package (for imports)
+    cd /app && pip install -e .
+    
+    # Make predict.py executable
+    chmod +x /app/predict.py
+    
+    # Create symbolic links for easy access to models
+    # (Update paths as needed based on your model locations)
+    # ln -sf /app/model.ckpt /app/default_model.ckpt
+    
+    # Verify installation
+    python -c "import torch; print(f'PyTorch version: {torch.__version__}')"
+    python -c "import lightning; print(f'Lightning version: {lightning.__version__}')"
+    python -c "import nibabel; print(f'NiBabel version: {nibabel.__version__}')"
+    python -c "from src.models.supervised_base import BaseSupervisedModel; print('Model imports successful')"
+
+%runscript
+    # Execute the prediction script with all arguments passed through
+    exec python /app/predict.py "$@"
+
+%help
+    FOMO25 Task 1 Infarct Detection Inference Container
+    
+    This container performs binary classification to detect the presence of 
+    infarcts in brain MRI images using multiple modalities.
+    
+    USAGE:
+        apptainer run container.sif \
+            --flair /input/flair.nii.gz \
+            --adc /input/adc.nii.gz \
+            --dwi_b1000 /input/dwi_b1000.nii.gz \
+            --t2s /input/t2s.nii.gz \
+            --output /output/prediction.txt
+    
+    REQUIRED INPUTS:
+        --flair: T2 FLAIR image (NIfTI format)
+        --adc: ADC image (NIfTI format) 
+        --dwi_b1000: DWI b1000 image (NIfTI format)
+        --t2s OR --swi: T2* or SWI image (NIfTI format)
+        --output: Output file path for probability
+    
+    OPTIONAL PARAMETERS:
+        --checkpoint: Custom checkpoint path (uses default if not specified)
+        --tta_enable: Enable Test-Time Augmentation
+        --ensemble_checkpoints: Comma-separated ensemble model paths
+        --confidence_threshold: Minimum confidence for prediction
+        --verbose: Enable detailed logging
+    
+    EXAMPLES:
+        # Basic usage
+        apptainer run --bind input:/input,output:/output container.sif \
+            --flair /input/flair.nii.gz \
+            --adc /input/adc.nii.gz \
+            --dwi_b1000 /input/dwi_b1000.nii.gz \
+            --swi /input/swi.nii.gz \
+            --output /output/prediction.txt
+            
+        # With Test-Time Augmentation
+        apptainer run --bind input:/input,output:/output container.sif \
+            --flair /input/flair.nii.gz \
+            --adc /input/adc.nii.gz \
+            --dwi_b1000 /input/dwi_b1000.nii.gz \
+            --t2s /input/t2s.nii.gz \
+            --output /output/prediction.txt \
+            --tta_enable \
+            --tta_views 4 \
+            --verbose
+            
+        # With ensemble inference
+        apptainer run --bind input:/input,output:/output container.sif \
+            --flair /input/flair.nii.gz \
+            --adc /input/adc.nii.gz \
+            --dwi_b1000 /input/dwi_b1000.nii.gz \
+            --t2s /input/t2s.nii.gz \
+            --output /output/prediction.txt \
+            --ensemble_checkpoints /app/ensemble_model_2.ckpt,/app/ensemble_model_3.ckpt \
+            --confidence_threshold 0.1
+    
+    OUTPUT:
+        A text file containing a single probability value (0.0 to 1.0) 
+        indicating the likelihood of infarct presence.
+    
+    NOTES:
+        - Container expects NIfTI format (.nii.gz) input images
+        - GPU acceleration automatically used if available
+        - Memory requirements: ~4-8GB depending on model and input size
+        - Processing time: ~30-60 seconds per case depending on configuration
+        
+    For more information, see: https://github.com/fomo25/baseline-codebase

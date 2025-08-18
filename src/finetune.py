@@ -572,7 +572,8 @@ def main():
         save_dir=version_dir,
         log_every_n_steps=args.log_every_n_steps,
         plot_every_n_epochs=1,  # Save plots every epoch
-        smoothing_window=args.smoothing_window     # Window size for moving average smoothing
+        smoothing_window=args.smoothing_window,     # Window size for moving average smoothing
+        best_metrics_file=os.path.join(version_dir, "best_metrics.txt")  # Pass best metrics file path
     )
     
     # Metrics stability callback for better monitoring

@@ -9,6 +9,7 @@ This module provides callbacks for:
 
 import os
 import logging
+from datetime import datetime
 from typing import Tuple
 try:
     import matplotlib
@@ -29,13 +30,141 @@ from lightning.pytorch import LightningModule, Trainer
 class EnhancedModelCheckpoint(ModelCheckpoint):
     """
     Enhanced ModelCheckpoint that provides terminal feedback when saving better checkpoints.
-    Shows current best metrics for better debugging.
+    Shows current best metrics for better debugging and saves best metrics to a persistent text file.
     """
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.best_metric_value = None
         self.metrics_history = []
+        
+        # Best metrics tracking for all important metrics (not just monitor metric)
+        self.best_metrics = {
+            'val/loss': {'value': float('inf'), 'epoch': -1, 'step': -1, 'mode': 'min'},
+            'val/auroc_subject': {'value': 0.0, 'epoch': -1, 'step': -1, 'mode': 'max'},
+            'val/corr': {'value': -1.0, 'epoch': -1, 'step': -1, 'mode': 'max'},
+            'val/accuracy': {'value': 0.0, 'epoch': -1, 'step': -1, 'mode': 'max'},
+            'val/mae': {'value': float('inf'), 'epoch': -1, 'step': -1, 'mode': 'min'},
+            'val/mse': {'value': float('inf'), 'epoch': -1, 'step': -1, 'mode': 'min'},
+        }
+        
+        # Initialize best metrics file path
+        self.best_metrics_file = None
+        
+    def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
+        """Setup callback - called once at the beginning of fit."""
+        super().setup(trainer, pl_module, stage)
+        
+        # Set up best metrics file path
+        if hasattr(self, 'dirpath') and self.dirpath:
+            self.best_metrics_file = os.path.join(self.dirpath, 'best_metrics.txt')
+            # Initialize the file
+            self._initialize_best_metrics_file()
+        
+    def _initialize_best_metrics_file(self):
+        """Initialize or load existing best metrics file."""
+        if not self.best_metrics_file:
+            return
+            
+        try:
+            if os.path.exists(self.best_metrics_file):
+                # Load existing best metrics
+                self._load_best_metrics_from_file()
+            else:
+                # Create new file with header
+                self._save_best_metrics_to_file()
+        except Exception as e:
+            logging.warning(f"Failed to initialize best metrics file: {e}")
+            
+    def _load_best_metrics_from_file(self):
+        """Load best metrics from existing file."""
+        try:
+            with open(self.best_metrics_file, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith('Best ') and ':' in line:
+                        # Parse line like "Best val/loss: 0.234567 (epoch 45, step 1234)"
+                        parts = line.split(': ', 1)
+                        if len(parts) == 2:
+                            metric_name = parts[0].replace('Best ', '')
+                            value_and_info = parts[1]
+                            
+                            # Extract value and epoch/step info
+                            if '(' in value_and_info and ')' in value_and_info:
+                                value_str = value_and_info.split(' (')[0]
+                                info_str = value_and_info.split('(')[1].split(')')[0]
+                                
+                                try:
+                                    value = float(value_str)
+                                    # Parse epoch and step
+                                    epoch = -1
+                                    step = -1
+                                    if 'epoch' in info_str:
+                                        epoch_part = info_str.split('epoch')[1].split(',')[0].strip()
+                                        epoch = int(epoch_part)
+                                    if 'step' in info_str:
+                                        step_part = info_str.split('step')[1].strip()
+                                        step = int(step_part)
+                                    
+                                    # Update best metrics if we track this metric
+                                    if metric_name in self.best_metrics:
+                                        self.best_metrics[metric_name]['value'] = value
+                                        self.best_metrics[metric_name]['epoch'] = epoch
+                                        self.best_metrics[metric_name]['step'] = step
+                                        
+                                except (ValueError, IndexError):
+                                    continue  # Skip malformed lines
+        except Exception as e:
+            logging.warning(f"Failed to load best metrics from file: {e}")
+            
+    def _save_best_metrics_to_file(self):
+        """Save current best metrics to file."""
+        if not self.best_metrics_file:
+            return
+            
+        try:
+            with open(self.best_metrics_file, 'w') as f:
+                f.write("# Best Metrics History\n")
+                f.write(f"# Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write("# Format: Best <metric>: <value> (epoch <epoch>, step <step>)\n\n")
+                
+                for metric_name, metric_info in self.best_metrics.items():
+                    if metric_info['epoch'] >= 0:  # Only write if we have valid data
+                        f.write(f"Best {metric_name}: {metric_info['value']:.6f} "
+                               f"(epoch {metric_info['epoch']}, step {metric_info['step']})\n")
+                        
+        except Exception as e:
+            logging.warning(f"Failed to save best metrics to file: {e}")
+            
+    def _update_best_metrics(self, current_metrics: Dict[str, float], trainer: Trainer):
+        """Update best metrics tracking and save to file if any new best is found."""
+        any_new_best = False
+        
+        for metric_name, current_value in current_metrics.items():
+            if metric_name in self.best_metrics and current_value is not None:
+                metric_info = self.best_metrics[metric_name]
+                mode = metric_info['mode']
+                current_best = metric_info['value']
+                
+                # Check if this is a new best
+                is_new_best = False
+                if mode == 'min':
+                    is_new_best = current_value < current_best
+                else:  # mode == 'max'
+                    is_new_best = current_value > current_best
+                    
+                if is_new_best:
+                    # Update best metrics
+                    self.best_metrics[metric_name]['value'] = current_value
+                    self.best_metrics[metric_name]['epoch'] = trainer.current_epoch
+                    self.best_metrics[metric_name]['step'] = trainer.global_step
+                    any_new_best = True
+                    
+        # Save to file if any new best was found
+        if any_new_best:
+            self._save_best_metrics_to_file()
+            
+        return any_new_best
         
     def _save_checkpoint(self, trainer: Trainer, filepath: str) -> None:
         # Call the parent method to save the checkpoint
@@ -45,29 +174,66 @@ class EnhancedModelCheckpoint(ModelCheckpoint):
         current_metrics = self._get_current_metrics(trainer)
         current_value = current_metrics.get(self.monitor, None)
         
-        # Check if this is a new best
-        is_new_best = self._is_new_best(current_value)
+        # Update best metrics tracking (for all metrics, not just monitor)
+        any_new_best = self._update_best_metrics(current_metrics, trainer)
         
-        if is_new_best and current_value is not None:
+        # Check if this is a new best for the primary monitor metric
+        is_new_best_monitor = self._is_new_best(current_value)
+        
+        if is_new_best_monitor and current_value is not None:
             self.best_metric_value = current_value
             
-            # Create terminal feedback
+            # Create enhanced terminal feedback
             print("=" * 80)
             print("🏆 NEW BEST CHECKPOINT SAVED!")
             print("=" * 80)
             print(f"📁 Checkpoint Path: {filepath}")
-            print(f"📊 Best {self.monitor}: {current_value:.6f}")
+            print(f"📊 Best {self.monitor}: {current_value:.6f} ⭐ NEW RECORD!")
             print(f"📈 Epoch: {trainer.current_epoch}")
             print(f"🔄 Global Step: {trainer.global_step}")
             
-            # Show additional metrics if available
+            # Show additional current metrics with best comparisons
             if current_metrics:
-                print("\n📋 Current Metrics:")
+                print("\n📋 Current Metrics vs Best:")
                 for metric_name, metric_value in current_metrics.items():
                     if metric_name != self.monitor and metric_value is not None:
-                        print(f"   {metric_name}: {metric_value:.6f}")
+                        if metric_name in self.best_metrics:
+                            best_info = self.best_metrics[metric_name]
+                            best_value = best_info['value']
+                            is_metric_best = (best_info['mode'] == 'min' and metric_value <= best_value) or \
+                                           (best_info['mode'] == 'max' and metric_value >= best_value)
+                            status_icon = "🆕" if is_metric_best else "📈" 
+                            print(f"   {metric_name}: {metric_value:.6f} ({status_icon} best: {best_value:.6f})")
+                        else:
+                            print(f"   {metric_name}: {metric_value:.6f}")
             
             print("=" * 80)
+            
+        elif any_new_best:
+            # Some metric improved but not the monitor metric
+            print("=" * 60)
+            print("📈 NEW BEST METRICS ACHIEVED!")
+            print("=" * 60)
+            print(f"📈 Epoch: {trainer.current_epoch}, Step: {trainer.global_step}")
+            
+            # Show which metrics achieved new bests
+            for metric_name, metric_value in current_metrics.items():
+                if metric_name in self.best_metrics and metric_value is not None:
+                    best_info = self.best_metrics[metric_name]
+                    is_current_best = abs(metric_value - best_info['value']) < 1e-8 and \
+                                    best_info['epoch'] == trainer.current_epoch
+                    if is_current_best:
+                        print(f"🆕 {metric_name}: {metric_value:.6f} ⭐ NEW BEST!")
+                        
+            # Always show val/loss status
+            if 'val/loss' in current_metrics:
+                val_loss = current_metrics['val/loss']
+                best_val_loss = self.best_metrics['val/loss']['value']
+                if val_loss <= best_val_loss:
+                    print(f"📉 val/loss: {val_loss:.6f} ⭐ NEW BEST!")
+                else:
+                    print(f"📉 val/loss: {val_loss:.6f} (📈 best: {best_val_loss:.6f})")
+            print("=" * 60)
             
     def _get_current_metrics(self, trainer: Trainer) -> Dict[str, float]:
         """Extract current metrics from trainer."""
@@ -114,6 +280,7 @@ class LossPlottingCallback(Callback):
     - Automatic saving every N epochs
     - Configurable figure size and saving directory
     - Window smoothing for noisy loss curves
+    - Best metrics annotations and horizontal lines
     - Robust error handling to avoid training interruption
     """
     
@@ -123,7 +290,8 @@ class LossPlottingCallback(Callback):
                  save_dir: str = "training_plots",
                  figure_size: Tuple[int, int] = (15, 10),
                  enable_plotting: bool = True,
-                 smoothing_window: int = 10):
+                 smoothing_window: int = 10,
+                 best_metrics_file: str = None):
         """
         Initialize the plotting callback.
         
@@ -134,6 +302,7 @@ class LossPlottingCallback(Callback):
             figure_size: Figure size for plots (width, height)
             enable_plotting: Whether to enable plotting (useful for debugging)
             smoothing_window: Window size for moving average smoothing (set to 1 to disable)
+            best_metrics_file: Path to best metrics file for annotations
         """
         super().__init__()
         self.plot_every_n_epochs = plot_every_n_epochs
@@ -142,6 +311,7 @@ class LossPlottingCallback(Callback):
         self.figure_size = figure_size
         self.plotting_enabled = enable_plotting
         self.smoothing_window = max(1, smoothing_window)  # Ensure at least 1
+        self.best_metrics_file = best_metrics_file
         
         # Create save directory
         os.makedirs(self.save_dir, exist_ok=True)
@@ -153,6 +323,13 @@ class LossPlottingCallback(Callback):
         self.val_aurocs = []
         self.train_steps = []
         self.val_steps = []
+        
+    def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
+        """Setup callback to find best metrics file if not provided."""
+        if not self.best_metrics_file and hasattr(trainer, 'checkpoint_callback'):
+            # Try to get best metrics file from checkpoint callback
+            if hasattr(trainer.checkpoint_callback, 'best_metrics_file'):
+                self.best_metrics_file = trainer.checkpoint_callback.best_metrics_file
         
     def _smooth_data(self, data, window_size=None):
         """
@@ -185,6 +362,74 @@ class LossPlottingCallback(Callback):
             smoothed[i] = np.mean(data_array[start_idx:i+1])
             
         return smoothed
+        
+    def _load_best_metrics(self):
+        """Load best metrics from file for plot annotations."""
+        best_metrics = {}
+        
+        if not self.best_metrics_file or not os.path.exists(self.best_metrics_file):
+            return best_metrics
+            
+        try:
+            with open(self.best_metrics_file, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith('Best ') and ':' in line:
+                        # Parse line like "Best val/loss: 0.234567 (epoch 45, step 1234)"
+                        parts = line.split(': ', 1)
+                        if len(parts) == 2:
+                            metric_name = parts[0].replace('Best ', '')
+                            value_and_info = parts[1]
+                            
+                            # Extract value and epoch/step info
+                            if '(' in value_and_info and ')' in value_and_info:
+                                value_str = value_and_info.split(' (')[0]
+                                info_str = value_and_info.split('(')[1].split(')')[0]
+                                
+                                try:
+                                    value = float(value_str)
+                                    # Parse epoch
+                                    epoch = -1
+                                    if 'epoch' in info_str:
+                                        epoch_part = info_str.split('epoch')[1].split(',')[0].strip()
+                                        epoch = int(epoch_part)
+                                    
+                                    best_metrics[metric_name] = {
+                                        'value': value,
+                                        'epoch': epoch,
+                                    }
+                                        
+                                except (ValueError, IndexError):
+                                    continue  # Skip malformed lines
+        except Exception as e:
+            logging.debug(f"Failed to load best metrics for plotting: {e}")
+            
+        return best_metrics
+        
+    def _add_best_metrics_annotation(self, ax, metric_name, steps_data, title_prefix=""):
+        """Add best metrics annotation to a plot axis."""
+        best_metrics = self._load_best_metrics()
+        
+        if metric_name in best_metrics and steps_data:
+            best_info = best_metrics[metric_name]
+            best_value = best_info['value']
+            best_epoch = best_info['epoch']
+            
+            # Add horizontal line for best value
+            ax.axhline(y=best_value, color='green', linestyle='--', alpha=0.7, linewidth=2)
+            
+            # Add text annotation
+            ax.text(0.02, 0.98, f"Best: {best_value:.6f} @ epoch {best_epoch}", 
+                   transform=ax.transAxes, fontsize=10, verticalalignment='top',
+                   bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.8))
+            
+            # Update title to include best value
+            current_title = ax.get_title()
+            if title_prefix:
+                new_title = f"{title_prefix} (Best: {best_value:.6f})"
+            else:
+                new_title = f"{current_title} (Best: {best_value:.6f})"
+            ax.set_title(new_title)
         
     def on_train_batch_end(self, trainer: Trainer, pl_module: LightningModule, 
                           outputs: Any, batch: Any, batch_idx: int) -> None:
@@ -317,6 +562,9 @@ class LossPlottingCallback(Callback):
                     ax2.set_title('Validation Loss')
                     ax2.grid(True, alpha=0.3)
                     ax2.legend()
+                    
+                    # Add best metrics annotation
+                    self._add_best_metrics_annotation(ax2, 'val/loss', steps_to_plot, 'Validation Loss')
                 else:
                     ax2.text(0.5, 0.5, 'Validation loss data misaligned', ha='center', va='center', transform=ax2.transAxes)
             else:
@@ -356,6 +604,9 @@ class LossPlottingCallback(Callback):
                 ax3.set_title('Training vs Validation Loss (Smoothed)')
                 ax3.grid(True, alpha=0.3)
                 ax3.legend()
+                
+                # Add best validation loss annotation to combined plot
+                self._add_best_metrics_annotation(ax3, 'val/loss', val_steps_safe)
             elif has_train_data:
                 train_steps_safe = self.train_steps[:len(self.train_losses)]
                 train_losses_safe = self.train_losses[:len(train_steps_safe)]
@@ -402,6 +653,10 @@ class LossPlottingCallback(Callback):
                 ax4.set_ylim(0, 1)
                 ax4.grid(True, alpha=0.3)
                 ax4.legend()
+                
+                # Add best AUROC annotation (using epoch-based data)
+                if val_epochs:
+                    self._add_best_metrics_annotation(ax4, 'val/auroc_subject', val_epochs, 'AUROC Progress')
             else:
                 ax4.text(0.5, 0.5, 'AUROC not available', ha='center', va='center', transform=ax4.transAxes)
                 ax4.set_title('AUROC Progress')

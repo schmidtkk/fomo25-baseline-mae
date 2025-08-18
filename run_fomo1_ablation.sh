@@ -3,7 +3,7 @@
 # Focuses on clinically relevant modality combinations based on stroke imaging principles
 # Key insight: DWI+ADC is the gold standard for acute infarct detection
 
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=0
 
 echo "🔬 FOMO Task 1 Optimized Infarct Detection Ablation Study"
 echo "=========================================================="
@@ -36,26 +36,27 @@ echo "-----------------------------------------------------------------"
 echo "🏥 Note: DWI is the gold standard for acute infarct detection"
 echo ""
 
-echo "🧪 Testing DWI only (primary infarct detector)..."
-PYTHONPATH=src python src/finetune.py $COMMON_ARGS \
-  --enabled_modalities "DWI" \
-  --dwi_ckpt ckpt/dwi.ckpt \
-  --fusion_type masked_mean \
-  --experiment "ablation_dwi_only"
+# echo "🧪 Testing DWI only (primary infarct detector)..."
+# PYTHONPATH=src python src/finetune.py $COMMON_ARGS \
+#   --enabled_modalities "DWI" \
+#   --dwi_ckpt ckpt/dwi.ckpt \
+#   --fusion_type masked_mean \
+#   --experiment "ablation_dwi_only"
 
-echo "🧪 Testing ADC only (confirms restricted diffusion)..."
-PYTHONPATH=src python src/finetune.py $COMMON_ARGS \
-  --enabled_modalities "ADC" \
-  --dwi_ckpt ckpt/dwi.ckpt \
-  --fusion_type masked_mean \
-  --experiment "ablation_adc_only"
+# echo "🧪 Testing ADC only (confirms restricted diffusion)..."
+# PYTHONPATH=src python src/finetune.py $COMMON_ARGS \
+#   --enabled_modalities "ADC" \
+#   --dwi_ckpt ckpt/dwi.ckpt \
+#   --fusion_type masked_mean \
+#   --experiment "ablation_adc_only"
 
-echo "🧪 Testing T2FLAIR only (chronic changes, context)..."
-PYTHONPATH=src python src/finetune.py $COMMON_ARGS \
-  --enabled_modalities "T2FLAIR" \
-  --flair_ckpt ckpt/flair.ckpt \
-  --fusion_type masked_mean \
-  --experiment "ablation_flair_only"
+# echo "🧪 Testing T2FLAIR only (chronic changes, context)..."
+# PYTHONPATH=src python src/finetune.py $COMMON_ARGS \
+#   --enabled_modalities "T2FLAIR" \
+#   --flair_ckpt ckpt/flair.ckpt \
+#   --fusion_type masked_mean \
+#   --experiment "ablation_flair_only"
+
 
 echo ""
 echo "📊 Phase 2: Critical Pairwise Combinations (Clinically Optimal)"

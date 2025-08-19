@@ -1,1 +1,1 @@
-PYTHONPATH=src python -m unittest discover -s src/tests -p "test_*.py" -v 2>&1 | tee test.txt
+PYTHONPATH=src timeout 120 python3 -m pytest src/tests/ --tb=short | tee test_results.txt

@@ -61,7 +61,8 @@ def get_task_config(taskid):
 
 
 def main():
-    logging.getLogger().setLevel(logging.INFO)
+    # Quiet by default; raise to INFO/DEBUG via your launcher if needed
+    logging.getLogger().setLevel(logging.WARNING)
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -265,9 +266,9 @@ def main():
     do_weight_transfer = False
     experiment_name = f"{run_type}_{args.experiment}_{args.taskid}"
 
-    print(f"Using num_workers: {args.num_workers}, num_devices: {args.num_devices}")
-    print(f"Task type: {task_type}")
-    print("ARGS:", args)
+    logging.info(f"Using num_workers: {args.num_workers}, num_devices: {args.num_devices}")
+    logging.info(f"Task type: {task_type}")
+    logging.debug(f"ARGS: {args}")
 
     # Set up directory structure
     data_dir = args.data_dir
@@ -324,12 +325,7 @@ def main():
     ensure_dir_exists(version_dir)
     
     # Log the experiment structure
-    print(f"🧪 Experiment Structure:")
-    print(f"   📁 Base: {save_dir}")
-    print(f"   🏷️  Experiment: {clean_experiment_name}")
-    print(f"   📊 Version: {version}")
-    print(f"   📂 Full path: {version_dir}")
-    print("")
+    logging.info(f"Experiment dir: {version_dir} (base={save_dir}, name={clean_experiment_name}, version={version})")
 
     # Create dataset splits
     if args.split_method == "kfold":
@@ -348,18 +344,28 @@ def main():
         ]
         assert len(subject_dirs) > 0, f"No subject directories found in fusion dir: {fusion_dir}"
 
-        # Read labels for stratification
-        def read_label(subj_dir: str) -> float:
-            path = os.path.join(subj_dir, "label.txt")
-            return float(open(path, "r").read().strip())
+        # Read labels for stratification (except for segmentation tasks)
+        if task_type == "segmentation":
+            # For segmentation, we don't need label-based stratification
+            # since the "labels" are segmentation masks, not discrete classes
+            labels = None
+        else:
+            def read_label(subj_dir: str) -> float:
+                path = os.path.join(subj_dir, "label.txt")
+                return float(open(path, "r").read().strip())
 
-        labels = [read_label(sd) for sd in subject_dirs]
+            labels = [read_label(sd) for sd in subject_dirs]
 
         import random
         rnd = random.Random(2025)
 
         # Task-type aware splitting strategy
-        if task_type == "regression":
+        if task_type == "segmentation":
+            # For segmentation: simple random split (no stratification needed)
+            rnd.shuffle(subject_dirs)
+            pos = subject_dirs  # Use all data as "positive" for unified logic below
+            neg = []  # Empty negative class for segmentation
+        elif task_type == "regression":
             # For regression: simple random split (no stratification needed for continuous labels)
             combined = list(zip(subject_dirs, labels))
             rnd.shuffle(combined)
@@ -623,25 +629,22 @@ def main():
     loggers = [yucca_logger]
 
     # Display quality enhancement features
-    print("📊 Quality Enhancement Features Enabled:")
-    print("   ✅ Enhanced checkpoint feedback with terminal prompts")
-    print("   ✅ Real-time loss plotting with shared log_every_n_steps")
+    logging.debug("Quality features: checkpoint feedback, loss plotting enabled")
     if task_type == "classification" and num_classes == 2:
-        print("   ✅ AUROC stability monitoring for binary classification")
-        print(f"   📈 Best checkpoints will be saved based on: {monitor_metric}")
+        logging.debug("AUROC stability monitoring for binary classification")
+        logging.debug(f"Best checkpoints monitor: {monitor_metric}")
     elif task_type == "classification":
-        print("   ✅ Accuracy stability monitoring for multi-class classification")
-        print(f"   📈 Best checkpoints will be saved based on: {monitor_metric}")
+        logging.debug("Accuracy stability monitoring for multi-class classification")
+        logging.debug(f"Best checkpoints monitor: {monitor_metric}")
     elif task_type == "regression":
-        print("   ✅ Pearson correlation monitoring (val/corr) for brain age regression")
-        print(f"   📈 Best checkpoints will be saved based on: {monitor_metric}")
-        print("   🧠 Enhanced metrics: MAE and Pearson Correlation")
+        logging.debug("Pearson correlation monitoring (val/corr) for brain age regression")
+        logging.debug(f"Best checkpoints monitor: {monitor_metric}")
+        logging.debug("Enhanced metrics: MAE and Pearson Correlation")
     else:
-        print("   ✅ Loss stability monitoring for other tasks")
-        print(f"   📈 Best checkpoints will be saved based on: {monitor_metric}")
-    print(f"   📊 Training progress plots will be saved to: {version_dir}")
-    print(f"   🔄 Metrics logged every {args.log_every_n_steps} steps")
-    print("")
+        logging.debug("Loss stability monitoring for other tasks")
+        logging.debug(f"Best checkpoints monitor: {monitor_metric}")
+    logging.debug(f"Training progress plots saved to: {version_dir}")
+    logging.debug(f"Metrics logged every {args.log_every_n_steps} steps")
 
 
     # Configure augmentations based on preset
@@ -682,13 +685,9 @@ def main():
         except Exception:
             pass
     # Print dataset information
-    print("Train dataset: ", data_module.splits_config.train(config["split_idx"]))
-    print("Val dataset: ", data_module.splits_config.val(config["split_idx"]))
-    print("Run type: ", run_type)
-    print(
-        f"Starting training with {max_iterations} max iterations over {args.epochs} epochs "
-        f"with train dataset of size {train_dataset_size} datapoints and val dataset of size {val_dataset_size} "
-        f"and effective batch size of {effective_batch_size}"
+    logging.info(f"Train/Val sizes: {train_dataset_size}/{val_dataset_size}; run_type={run_type}")
+    logging.info(
+        f"Start training: {max_iterations} iters, {args.epochs} epochs, effective_batch={effective_batch_size}"
     )
 
     # Initialize wandb logging
@@ -736,14 +735,14 @@ def main():
         config["enabled_modalities"] = enabled_modalities  # None means all enabled
         config["fusion_type"] = args.fusion_type
         
-        print(f"🧬 Modality configuration:")
-        print(f"   Available modalities: {finetune_modalities}")
+        logging.debug(f"Modality configuration")
+        logging.debug(f"Available modalities: {finetune_modalities}")
         if enabled_modalities is not None:
-            print(f"   Enabled modalities: {enabled_modalities}")
-            print(f"   Disabled modalities: {[m for m in finetune_modalities if m not in enabled_modalities]}")
+            logging.debug(f"Enabled modalities: {enabled_modalities}")
+            logging.debug(f"Disabled modalities: {[m for m in finetune_modalities if m not in enabled_modalities]}")
         else:
-            print(f"   All modalities enabled by default")
-        print(f"   Fusion type: {args.fusion_type}")
+            logging.debug("All modalities enabled by default")
+        logging.debug(f"Fusion type: {args.fusion_type}")
         
         default_mapping = {
             # FOMO1 canonical
@@ -766,7 +765,7 @@ def main():
         config["global_vocab"] = ["t1","t2","flair","dwi","other"]
     else:
         if args.use_multi_encoder:
-            print("Warning: --use_multi_encoder ignored in stacked mode; using single encoder.")
+            logging.warning("--use_multi_encoder ignored in stacked mode; using single encoder.")
 
     model = BaseSupervisedModel.create(
         task_type=task_type,
@@ -777,24 +776,18 @@ def main():
     )
 
     # Display accurate parameter counts considering freeze strategy
-    print("\n📊 Model Parameter Summary:")
-    print("=" * 50)
+    logging.info("Model Parameter Summary")
     if hasattr(model, 'get_effective_parameter_counts'):
         counts = model.get_effective_parameter_counts()
         if counts['freeze_active']:
-            print(f"🔒 Effectively FROZEN: {counts['frozen']:,} encoder parameters (LR=0)")
-            print(f"🔓 Actively TRAINING: {counts['trainable']:,} head parameters")
-            print(f"📝 Total Parameters: {counts['total']:,}")
-            print(f"💾 Estimated Model Size: {counts['total'] * 4 / 1024**2:.1f} MB (fp32)")
-            print(f"")
-            print(f"⚠️  Note: PyTorch Lightning will report all {counts['total']:,} as 'trainable'")
-            print(f"   because requires_grad=True (needed for mixed precision),")
-            print(f"   but {counts['frozen']:,} encoder params have LR=0 and won't update.")
+            logging.info(f"FROZEN encoder params: {counts['frozen']:,} (LR=0)")
+            logging.info(f"TRAINING head params: {counts['trainable']:,}")
+            logging.info(f"Total Params: {counts['total']:,} (~{counts['total'] * 4 / 1024**2:.1f} MB fp32)")
+            logging.debug(
+                f"Note: Lightning reports all as trainable (AMP), but {counts['frozen']:,} have LR=0"
+            )
         else:
-            print(f"🔓 All TRAINABLE: {counts['trainable']:,} parameters")
-            print(f"💾 Estimated Model Size: {counts['total'] * 4 / 1024**2:.1f} MB (fp32)")
-    print("=" * 50)
-    print("")
+            logging.info(f"All TRAINABLE: {counts['trainable']:,} params (~{counts['total'] * 4 / 1024**2:.1f} MB fp32)")
 
     # Create Lightning trainer
     trainer = L.Trainer(
@@ -818,8 +811,8 @@ def main():
 
     # Load pretrained weights if requested
     if do_weight_transfer:
-        print("Transferring pretrained weights where available")
-        print(f"Checkpoint path: {ckpt_path}")
+        logging.info("Transferring pretrained weights where available")
+        logging.debug(f"Checkpoint path: {ckpt_path}")
         assert ckpt_path is None, (
             "Error: You're attempting to load pretrained weights while "
             "simultaneously continuing from a checkpoint. This creates "
@@ -865,11 +858,11 @@ def main():
             for i, mod in enumerate(finetune_modalities):
                 group = mapping.get(mod, None)
                 if group is None:
-                    print(f"Warning: No global group mapping for modality {mod}. Skipping weight load.")
+                    logging.warning(f"No global group mapping for modality {mod}. Skipping weight load.")
                     continue
                 src_ckpt = ckpt_map.get(group, None)
                 if src_ckpt is None:
-                    print(f"Warning: No checkpoint provided for group '{group}'. {mod} will use random init.")
+                    logging.warning(f"No checkpoint provided for group '{group}'. {mod} will use random init.")
                     continue
                 sd = load_pretrained_weights(src_ckpt, args.compile)["state_dict"]
                 for k, v in sd.items():
@@ -883,9 +876,9 @@ def main():
                 state_dict=merged_state, strict=False
             )
         if num_successful_weights_transferred == 0:
-            print("Warning: No weights were successfully transferred; proceeding with random init.")
+            logging.warning("No weights were successfully transferred; proceeding with random init.")
     else:
-        print("Training from scratch, no weights will be transferred")
+        logging.info("Training from scratch, no weights will be transferred")
 
     # Start training
     trainer.fit(model=model, datamodule=data_module, ckpt_path=ckpt_path)

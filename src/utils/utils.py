@@ -81,7 +81,7 @@ def parallel_process(process_func, tasks, num_workers=None, desc="Processing"):
     if num_workers is None:
         num_workers = max(1, multiprocessing.cpu_count() - 1)
 
-    print(f"Processing {len(tasks)} items using {num_workers} workers")
+    logging.info(f"Processing {len(tasks)} items using {num_workers} workers")
 
     with multiprocessing.Pool(processes=num_workers) as pool:
         results = list(
@@ -94,7 +94,7 @@ def parallel_process(process_func, tasks, num_workers=None, desc="Processing"):
         for result in results
         if isinstance(result, str) and not result.startswith("Error")
     )
-    print(
+    logging.info(
         f"Processing complete: {successful}/{len(tasks)} items processed successfully"
     )
 
@@ -105,12 +105,10 @@ def parallel_process(process_func, tasks, num_workers=None, desc="Processing"):
         if isinstance(result, str) and result.startswith("Error")
     ]
     if errors:
-        print(f"Encountered {len(errors)} errors:")
-        for error in errors[
-            :10
-        ]:  # Show only first 10 errors to avoid cluttering output
-            print(f"  {error}")
+        logging.warning(f"Encountered {len(errors)} errors:")
+        for error in errors[:10]:  # Show only first 10 errors to avoid cluttering output
+            logging.debug(f"  {error}")
         if len(errors) > 10:
-            print(f"  ... and {len(errors) - 10} more")
+            logging.debug(f"  ... and {len(errors) - 10} more")
 
     return results

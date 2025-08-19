@@ -1,4 +1,5 @@
 from typing import Dict, List, Optional, Callable
+import logging
 
 import torch
 import torch.nn as nn
@@ -46,10 +47,11 @@ class MultiModalEncoderWithFusion(nn.Module):
                 raise ValueError(f"Invalid enabled modalities: {invalid}. Available: {modality_names}")
             self.enabled_modalities = set(enabled_modalities)
             
-        print(f"🔧 Multi-encoder setup: {len(modality_names)} total, {len(self.enabled_modalities)} enabled")
-        print(f"   Enabled: {sorted(self.enabled_modalities)}")
-        print(f"   Disabled: {sorted(set(modality_names) - self.enabled_modalities)}")
-        print(f"   Fusion type: {fusion_type}")
+        logging.debug(
+            f"Multi-encoder setup: total={len(modality_names)}, enabled={len(self.enabled_modalities)}, fusion={fusion_type}"
+        )
+        logging.debug(f"Enabled: {sorted(self.enabled_modalities)}")
+        logging.debug(f"Disabled: {sorted(set(modality_names) - self.enabled_modalities)}")
 
         def _infer_group(mod_name: str) -> str:
             n = mod_name.lower()
@@ -154,14 +156,11 @@ class MultiModalEncoderWithFusion(nn.Module):
         invalid = set(enabled_modalities) - set(self.modality_names)
         if invalid:
             raise ValueError(f"Invalid modalities: {invalid}. Available: {self.modality_names}")
-        
+
         old_enabled = self.enabled_modalities.copy()
         self.enabled_modalities = set(enabled_modalities)
-        
-        print(f"🔄 Modality switches updated:")
-        print(f"   Previously enabled: {sorted(old_enabled)}")
-        print(f"   Now enabled: {sorted(self.enabled_modalities)}")
-        
+        logging.info("Modality switches updated: %s -> %s", sorted(old_enabled), sorted(self.enabled_modalities))
+
         # Update fusion layers to handle the new modality configuration
         self._update_fusion_masks()
     
@@ -179,7 +178,7 @@ class MultiModalEncoderWithFusion(nn.Module):
         if modality_name not in self.modality_names:
             raise ValueError(f"Unknown modality: {modality_name}")
         self.enabled_modalities.add(modality_name)
-        print(f"✅ Enabled modality: {modality_name}")
+        logging.debug("Enabled modality: %s", modality_name)
     
     def disable_modality(self, modality_name: str) -> None:
         """Disable a specific modality."""
@@ -188,17 +187,20 @@ class MultiModalEncoderWithFusion(nn.Module):
         if len(self.enabled_modalities) <= 1:
             raise ValueError("Cannot disable modality - at least one must remain enabled")
         self.enabled_modalities.discard(modality_name)
-        print(f"❌ Disabled modality: {modality_name}")
+        logging.debug("Disabled modality: %s", modality_name)
 
     @torch.no_grad()
     def _split_modalities(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
         Split input [B,M,D,H,W] into a dict of [B,1,D,H,W] per modality.
+        Be tolerant to missing modalities (M < configured) and ignore extra channels (M > configured).
         """
         assert x.dim() == 5, f"Expected 5D tensor, got {x.shape}"
         B, M, D, H, W = x.shape
-        assert M == self.num_modalities, f"Expected {self.num_modalities} modalities but got {M}"
-        return {name: x[:, i : i + 1] for i, name in enumerate(self.modality_names)}
+        use_M = min(M, self.num_modalities)
+        # Map the first 'use_M' channels to the first 'use_M' modality names
+        xs = {name: x[:, i : i + 1] for i, name in enumerate(self.modality_names[:use_M])}
+        return xs
 
     def forward(
         self, x: torch.Tensor, mask: Optional[torch.Tensor] = None, modality_ids: Optional[List[int]] = None
@@ -215,7 +217,7 @@ class MultiModalEncoderWithFusion(nn.Module):
         if mask is None:
             with torch.no_grad():
                 mask = (x.abs().view(B, M, -1).sum(dim=-1) > 0).to(x.dtype)
-
+        
         xs = self._split_modalities(x)
         
         # Filter for only enabled modalities
@@ -225,7 +227,8 @@ class MultiModalEncoderWithFusion(nn.Module):
         enabled_mask = []
         
         for i, name in enumerate(self.modality_names):
-            if name in self.enabled_modalities:
+            # Only consider modalities that are enabled AND present in the current input
+            if name in self.enabled_modalities and name in xs:
                 enabled_indices.append(i)
                 enabled_modality_names.append(name)
                 enabled_xs[name] = xs[name]

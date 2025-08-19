@@ -92,7 +92,7 @@ class TestEnhancedModelCheckpointBestMetrics(unittest.TestCase):
         
         # Check that val/auroc_subject was updated (should be better than initial 0.0)
         self.assertTrue(any_new_best)
-        self.assertEqual(self.checkpoint_callback.best_metrics['val/auroc_subject']['value'], 0.85)
+        self.assertAlmostEqual(self.checkpoint_callback.best_metrics['val/auroc_subject']['value'], 0.85, places=5)
         
     def test_best_metrics_no_improvement(self):
         """Test that no update occurs when metrics don't improve."""
@@ -146,8 +146,8 @@ class TestEnhancedModelCheckpointBestMetrics(unittest.TestCase):
         
     def test_enhanced_terminal_output_format(self):
         """Test the enhanced terminal output includes best metrics comparison."""
-        # Mock print function to capture output
-        with patch('builtins.print') as mock_print:
+        # Mock logging to capture output instead of print
+        with patch('logging.info') as mock_log:
             # Set up scenario where monitor metric improves
             self.checkpoint_callback.monitor = "val/loss"
             self.checkpoint_callback.mode = "min"
@@ -158,17 +158,14 @@ class TestEnhancedModelCheckpointBestMetrics(unittest.TestCase):
                 'val/auroc_subject': torch.tensor(0.75)
             }
             
-            # Call _save_checkpoint (but don't actually save)
-            with patch.object(self.checkpoint_callback, '_save_model') as mock_save:
+            # Mock the parent save checkpoint to prevent actual saving
+            with patch('lightning.pytorch.callbacks.ModelCheckpoint._save_checkpoint') as mock_save:
                 self.checkpoint_callback._save_checkpoint(self.mock_trainer, "test.ckpt")
                 
-            # Check that enhanced output was printed
-            print_calls = [call[0][0] for call in mock_print.call_args_list]
-            output_str = '\n'.join(print_calls)
-            
-            self.assertIn("🏆 NEW BEST CHECKPOINT SAVED!", output_str)
-            self.assertIn("⭐ NEW RECORD!", output_str)
-            self.assertIn("📋 Current Metrics vs Best:", output_str)
+            # Check that enhanced output was logged
+            # logging.info calls use format strings, so check the actual calls
+            self.assertTrue(any("NEW BEST CHECKPOINT SAVED:" in str(call) for call in mock_log.call_args_list))
+            self.assertTrue(any("Best" in str(call) and "%.6f" in str(call) for call in mock_log.call_args_list))
 
 
 class TestLossPlottingCallbackBestMetrics(unittest.TestCase):
@@ -313,6 +310,7 @@ class TestIntegrationBestMetrics(unittest.TestCase):
                 'val/loss': torch.tensor(0.25),
                 'val/auroc_subject': torch.tensor(0.80)
             }
+            mock_trainer.callback_metrics = {}
             
             mock_module = Mock()
             

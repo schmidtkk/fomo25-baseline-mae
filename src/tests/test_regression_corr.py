@@ -36,11 +36,9 @@ def test_corr_invariance_to_scaling_without_trainer():
     y1 = x.clone()
     y2 = 2.0 * x + 3.0
 
-    # We will update train metrics twice, resetting Pearson in between
-    metrics = MetricCollection({"train/mae": MeanAbsoluteError()})
-
+    # Use the model's train metrics directly
     # First batch
-    model.compute_metrics(metrics, output=y1, target=x)
+    model.compute_metrics(model.train_metrics, output=y1, target=x)
     if hasattr(model, "pearson_train"):
         corr1 = model.pearson_train.compute().item()
         model.pearson_train.reset()
@@ -49,7 +47,7 @@ def test_corr_invariance_to_scaling_without_trainer():
         raise AssertionError("pearson_train not created by compute_metrics")
 
     # Second batch (scaled + biased), correlation should be identical
-    model.compute_metrics(metrics, output=y2, target=x)
+    model.compute_metrics(model.train_metrics, output=y2, target=x)
     corr2 = model.pearson_train.compute().item()
 
     # Correlation should be equal up to small tolerance

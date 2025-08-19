@@ -78,14 +78,15 @@ class SupervisedRegModel(BaseSupervisedModel):
         if self.loss_type == "mae":
             # MAE loss - more robust to age outliers than MSE
             loss_fn = torch.nn.L1Loss()
-            print("🧠 Using MAE loss for robust brain age regression")
+            import logging
+            logging.info("Using MAE loss for robust brain age regression")
         elif self.loss_type == "huber":
             # Huber loss - combines MSE and MAE benefits
             loss_fn = torch.nn.HuberLoss(delta=1.0)  # delta=1 year for age prediction
-            print("🧠 Using Huber loss for robust brain age regression")
+            logging.info("Using Huber loss for robust brain age regression")
         else:  # Default MSE
             loss_fn = torch.nn.MSELoss()
-            print("🧠 Using MSE loss for brain age regression")
+            logging.info("Using MSE loss for brain age regression")
             
         return loss_fn, loss_fn
 

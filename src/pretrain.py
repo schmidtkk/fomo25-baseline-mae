@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import os
+import logging
 import torch
 import lightning as L
 import argparse
@@ -118,17 +119,14 @@ def main():
     assert args.mask_patch_size < args.patch_size
 
     # Concise startup summary
-    print(
-        f"[STARTUP] Experiment: {args.experiment} | Modality: {args.modality_mode} | "
-        f"Model: {args.model_name} | Patch: {args.patch_size} | Batch: {args.batch_size} | "
-        f"Devices: {args.num_devices} | Workers: {args.num_workers}"
+    logging.info(
+        f"[STARTUP] Experiment: {args.experiment} | Modality: {args.modality_mode} | Model: {args.model_name} | Patch: {args.patch_size} | Batch: {args.batch_size} | Devices: {args.num_devices} | Workers: {args.num_workers}"
     )
-    print(
+    logging.info(
         f"[STARTUP] Data dir: {args.pretrain_data_dir} | Save dir: {args.save_dir} | Precision: {args.precision}"
     )
-
-    print(f"Using num_workers: {args.num_workers}, num_devices: {args.num_devices}")
-    print("ARGS:", args)
+    logging.debug(f"Using num_workers: {args.num_workers}, num_devices: {args.num_devices}")
+    logging.debug(f"ARGS: {args}")
 
     # Set up directory structure
     train_data_dir = args.pretrain_data_dir
@@ -253,19 +251,17 @@ def main():
 
     # Log modality stats
     modality_stats = getattr(data, "modality_stats", {})
-    print(
+    logging.info(
         f"Modality mode: {args.modality_mode} | Train size: {config['train_dataset_size']} | Val size: {config['val_dataset_size']}"
     )
     if modality_stats:
-        print(f"Train modalities kept: {modality_stats.get('train', {}).get('kept_modalities', {})}")
-        print(f"Train modalities dropped: {modality_stats.get('train', {}).get('dropped_modalities', {})}")
-        print(f"Val modalities kept: {modality_stats.get('val', {}).get('kept_modalities', {})}")
-        print(f"Val modalities dropped: {modality_stats.get('val', {}).get('dropped_modalities', {})}")
+        logging.debug(f"Train modalities kept: {modality_stats.get('train', {}).get('kept_modalities', {})}")
+        logging.debug(f"Train modalities dropped: {modality_stats.get('train', {}).get('dropped_modalities', {})}")
+        logging.debug(f"Val modalities kept: {modality_stats.get('val', {}).get('kept_modalities', {})}")
+        logging.debug(f"Val modalities dropped: {modality_stats.get('val', {}).get('dropped_modalities', {})}")
 
-    print(
-        f"Starting training with {max_iterations} max iterations over {config['epochs']} epochs "
-        f"with {config['train_dataset_size']} training datapoints, {config['val_dataset_size']} validation datapoints, "
-        f"and an effective batch size of {config['effective_batch_size']}"
+    logging.info(
+        f"Starting training with {max_iterations} max iterations over {config['epochs']} epochs with {config['train_dataset_size']} train, {config['val_dataset_size']} val, effective batch size {config['effective_batch_size']}"
     )
 
     # Create model and trainer
@@ -330,7 +326,7 @@ def main():
     )
 
     trainer.fit(model=model, datamodule=data, ckpt_path="last")
-    trainer.print(f"Memory used: {torch.cuda.max_memory_allocated() / 1e9:.02f} GB")
+    logging.info(f"Memory used: {torch.cuda.max_memory_allocated() / 1e9:.02f} GB")
 
     # Close the wandb logging session
     wandb.finish()

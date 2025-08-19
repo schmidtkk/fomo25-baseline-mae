@@ -1,4 +1,5 @@
 import copy
+import logging
 from typing import List
 import lightning as L
 import torch
@@ -72,8 +73,8 @@ class SelfSupervisedModel(L.LightningModule):
         # only mednext
         self.norm_type = norm_type
 
-        print(
-            f"Compile settings are should_compile: {should_compile}, compile_mode: {compile_mode}"
+        logging.info(
+            f"Compile settings are should_compile: {self.should_compile}, compile_mode: {self.compile_mode}"
         )
 
         # Save params and start training
@@ -81,10 +82,9 @@ class SelfSupervisedModel(L.LightningModule):
         self.load_model()
 
     def load_model(self):
-        print(f"Loading Model: 3D {self.model_name}")
+        logging.debug(f"Loading Model: 3D {self.model_name}")
         model_func = getattr(networks, self.model_name)
-
-        print("Found model: ", model_func)
+        logging.debug(f"Found model: {model_func}")
 
         conv_op = torch.nn.Conv3d
         norm_op = torch.nn.InstanceNorm3d
@@ -177,7 +177,7 @@ class SelfSupervisedModel(L.LightningModule):
         elif self.optimizer == "Adam":
             optimizer = Adam(self.parameters(), lr=self.learning_rate)
 
-        print(f"Using optimizer {self.optimizer}")
+        logging.info(f"Using optimizer {self.optimizer}")
 
         # cosine_half_period is from max to min
         cosine_half_period = (
@@ -249,12 +249,12 @@ class SelfSupervisedModel(L.LightningModule):
                 ):
                     rejected_keys_data.append(param_name)
 
-        print(
+        logging.info(
             f"Succesfully transferred weights for {successful}/{successful+unsuccessful} layers"
         )
-        print(
-            f"Rejected the following keys:\n"
-            f"Not in old dict: {rejected_keys_new}.\n"
-            f"Wrong shape: {rejected_keys_shape}.\n"
-            f"Post check not succesful: {rejected_keys_data}."
+        logging.debug(
+            "Rejected keys | Not in old dict: %s | Wrong shape: %s | Post-check not successful: %s",
+            rejected_keys_new,
+            rejected_keys_shape,
+            rejected_keys_data,
         )

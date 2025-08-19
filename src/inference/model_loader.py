@@ -470,19 +470,21 @@ if __name__ == "__main__":
     
     try:
         checkpoints = get_available_checkpoints()
-        
-        print(f"Found {len(checkpoints)} checkpoints:")
+
+        logging.info(f"Found {len(checkpoints)} checkpoints")
         for ckpt in checkpoints[:10]:  # Show top 10
-            print(f"  {ckpt['score']:3d}: {ckpt['name']} ({ckpt['architecture']}, {ckpt['encoder_type']})")
-        
+            logging.info(
+                f"  {ckpt['score']:3d}: {ckpt['name']} ({ckpt['architecture']}, {ckpt['encoder_type']})"
+            )
+
         if checkpoints:
             best_checkpoint = checkpoints[0]['path']
-            print(f"\nBest checkpoint: {best_checkpoint}")
-            
+            logging.info(f"Best checkpoint: {best_checkpoint}")
+
             # Demonstrate model loading
-            print("\nLoading model...")
-            model = ModelLoader.load_model(best_checkpoint, 'classification')
-            print("Model loaded successfully!")
-            
+            logging.info("Loading model...")
+            _ = ModelLoader.load_model(best_checkpoint, 'classification')
+            logging.info("Model loaded successfully!")
+    
     except Exception as e:
-        print(f"Error: {e}")
+        logging.error(f"Error: {e}")

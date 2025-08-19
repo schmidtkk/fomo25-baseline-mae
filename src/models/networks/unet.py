@@ -1,4 +1,5 @@
 from typing import Literal
+import logging
 
 import torch
 import torch.nn as nn
@@ -219,7 +220,7 @@ class UNetEncoder(nn.Module):
         )
 
         if self.weightInitializer is not None:
-            print("initializing weights")
+            logging.debug("UNetEncoder: initializing weights")
             self.apply(self.weightInitializer)
 
     def forward(self, x):
@@ -376,7 +377,7 @@ class UNetDecoder(nn.Module):
             self.dropout_op_kwargs["p"] = old_dropout_p
 
         if self.weightInitializer is not None:
-            print("initializing weights")
+            logging.debug("UNetDecoder: initializing weights")
             self.apply(self.weightInitializer)
 
     def forward(self, xs):

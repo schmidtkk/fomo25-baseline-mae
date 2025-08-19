@@ -66,7 +66,8 @@ class MaskedMeanFusion3D(nn.Module):
         if self.use_null:
             Fstack = Fstack + (1 - m) * self.null_token
 
-        cnt = mask.sum(dim=1, keepdim=True).clamp_min(1.0).view(B, 1, 1, 1, 1, 1)
+        # Count present modalities per sample -> [B,1,1,1,1] for correct broadcasting
+        cnt = mask.sum(dim=1, keepdim=True).clamp_min(1.0).view(B, 1, 1, 1, 1)
         fused = Fstack.sum(dim=1) / cnt  # [B,C,D,H,W]
 
         fused = fused * self.post_scale + self.post_bias

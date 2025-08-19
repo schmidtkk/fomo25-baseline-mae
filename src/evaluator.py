@@ -1,4 +1,5 @@
 import os
+import logging
 from functools import partial
 from typing import Optional
 import numpy as np
@@ -100,17 +101,16 @@ class Evaluator:
 
         self.num_workers = num_workers
 
-        print(
-            f"\n"
-            f"STARTING EVALUATION \n"
-            f"Folder with predictions: {self.folder_with_predictions}\n"
-            f"Folder with ground truth: {self.folder_with_ground_truth}\n"
-            f"Evaluating performance on labels: {self.labels}"
+        logging.info(
+            "STARTING EVALUATION | pred=%s | gt=%s | labels=%s",
+            self.folder_with_predictions,
+            self.folder_with_ground_truth,
+            self.labels,
         )
 
     def sanity_checks(self):
-        print("pred subjects", self.pred_subjects)
-        print("gt subjects", self.gt_subjects)
+        logging.debug("pred subjects: %s", self.pred_subjects)
+        logging.debug("gt subjects: %s", self.gt_subjects)
 
         assert (
             self.pred_subjects <= self.gt_subjects
@@ -131,13 +131,11 @@ class Evaluator:
             dataset_json = join(self.raw_data_path, gt_task, "dataset.json")
             if isfile(dataset_json):
                 dataset_json = load_json(dataset_json)
-                print(
-                    f"Labels found in dataset.json: {list(dataset_json['labels'].keys())}"
-                )
+                logging.debug("Labels in dataset.json: %s", list(dataset_json['labels'].keys()))
 
     def run(self):
         if isfile(self.outpath) and not self.overwrite:
-            print(f"Evaluation file already present in {self.outpath}. Skipping.")
+            logging.info("Evaluation file already present in %s. Skipping.", self.outpath)
         else:
             self.sanity_checks()
             results_dict = self.evaluate_folder()
@@ -188,7 +186,7 @@ class Evaluator:
         return dict(results) | {"mean": mean_results}
 
     def save_as_json(self, dict):
-        print("Saving results.json at path: ", self.outpath)
+        logging.info("Saving results.json to %s", self.outpath)
         with open(self.outpath, "w") as f:
             json.dump(dict, f, default=float, indent=4)
 

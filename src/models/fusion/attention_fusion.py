@@ -247,8 +247,9 @@ class AttentionFusion3D(nn.Module):
         weighted_feats = attended_feats * modality_weights * m
         
         # Sum across modalities (weighted average)
-        cnt = mask.sum(dim=1, keepdim=True).clamp_min(1.0).view(B, 1, 1, 1, 1, 1)
-        fused = weighted_feats.sum(dim=1) / cnt.clamp_min(self.eps)  # [B, C, D, H, W]
+        cnt = mask.sum(dim=1, keepdim=True).clamp_min(1.0).view(B, 1, 1, 1, 1)  # [B, 1, 1, 1, 1] not 6D
+        fused_summed = weighted_feats.sum(dim=1)
+        fused = fused_summed / cnt.clamp_min(self.eps)  # [B, C, D, H, W]
         
         # Post-fusion scaling and bias
         fused = fused * self.post_scale + self.post_bias

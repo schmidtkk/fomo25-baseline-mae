@@ -64,26 +64,26 @@ echo "---------------------------------------------------------------"
 echo "🏥 Note: DWI+ADC is the gold standard combination for infarct detection"
 echo ""
 
-echo "🧪 Testing DWI + ADC (gold standard diffusion pair) - Channel Attention..."
-PYTHONPATH=src python src/finetune.py $COMMON_ARGS \
-  --enabled_modalities "DWI,ADC" \
-  --dwi_ckpt ckpt/dwi.ckpt \
-  --fusion_type channel_attention \
-  --experiment "ablation_dwi_adc_chanatt"
+# echo "🧪 Testing DWI + ADC (gold standard diffusion pair) - Channel Attention..."
+# PYTHONPATH=src python src/finetune.py $COMMON_ARGS \
+#   --enabled_modalities "DWI,ADC" \
+#   --dwi_ckpt ckpt/dwi.ckpt \
+#   --fusion_type channel_attention \
+#   --experiment "ablation_dwi_adc_chanatt"
 
-echo "🧪 Testing DWI + ADC (gold standard) - Learnable Weighted..."
-PYTHONPATH=src python src/finetune.py $COMMON_ARGS \
-  --enabled_modalities "DWI,ADC" \
-  --dwi_ckpt ckpt/dwi.ckpt \
-  --fusion_type learnable_weighted \
-  --experiment "ablation_dwi_adc_learnable"
+# echo "🧪 Testing DWI + ADC (gold standard) - Learnable Weighted..."
+# PYTHONPATH=src python src/finetune.py $COMMON_ARGS \
+#   --enabled_modalities "DWI,ADC" \
+#   --dwi_ckpt ckpt/dwi.ckpt \
+#   --fusion_type learnable_weighted \
+#   --experiment "ablation_dwi_adc_learnable"
 
-echo "🧪 Testing DWI + T2FLAIR (acute + chronic context)..."
-PYTHONPATH=src python src/finetune.py $COMMON_ARGS \
-  --enabled_modalities "DWI,T2FLAIR" \
-  --dwi_ckpt ckpt/dwi.ckpt --flair_ckpt ckpt/flair.ckpt \
-  --fusion_type channel_attention \
-  --experiment "ablation_dwi_flair"
+# echo "🧪 Testing DWI + T2FLAIR (acute + chronic context)..."
+# PYTHONPATH=src python src/finetune.py $COMMON_ARGS \
+#   --enabled_modalities "DWI,T2FLAIR" \
+#   --dwi_ckpt ckpt/dwi.ckpt --flair_ckpt ckpt/flair.ckpt \
+#   --fusion_type channel_attention \
+#   --experiment "ablation_dwi_flair"
 
 echo ""
 echo "📊 Phase 3: Three-Modality Optimal Combination"

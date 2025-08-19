@@ -377,5 +377,6 @@ logger = logging.getLogger(__name__)
 
 if __name__ == "__main__":
     # This is a utility module, main functionality in task-specific scripts
-    print("FOMO25 Inference Framework")
-    print("Use task-specific scripts like predict_task1.py for inference")
+    import logging
+    logging.info("FOMO25 Inference Framework")
+    logging.info("Use task-specific scripts like predict_task1.py for inference")

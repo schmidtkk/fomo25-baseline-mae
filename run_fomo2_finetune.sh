@@ -29,7 +29,7 @@ PYTHONPATH=src python3 src/finetune.py \
   --flair_ckpt ckpt/flair.ckpt \
   --other_ckpt ckpt/other.ckpt \
   --precision bf16-mixed \
-  --patch_size=64 \
+  --patch_size 64 \
   --train_batches_per_epoch=100 \
   --epochs 300 --batch_size 1 --num_devices 1 --num_workers 8 \
   --starting_filters 64 \

@@ -80,6 +80,7 @@ def process_subject(task_info):
             normalization_operation=[pp_config["norm_op"] for _ in present_indices],
             allow_missing_modalities=False,
             crop_to_nonzero=pp_config["crop_to_nonzero"],
+            target_spacing=pp_config.get("target_spacing", None),  # Use task-specific spacing
         )
         # Normalize return type across yucca versions:
         # Some versions return a list of arrays, others return a stacked ndarray.

@@ -50,19 +50,19 @@ echo ""
 #   --fusion_type masked_mean \
 #   --experiment "ablation_adc_only"
 
-# echo "🧪 Testing T2FLAIR only (chronic changes, context)..."
-# PYTHONPATH=src python src/finetune.py $COMMON_ARGS \
-#   --enabled_modalities "T2FLAIR" \
-#   --flair_ckpt ckpt/flair.ckpt \
-#   --fusion_type masked_mean \
-#   --experiment "ablation_flair_only"
+echo "🧪 Testing T2FLAIR only (chronic changes, context)..."
+PYTHONPATH=src python src/finetune.py $COMMON_ARGS \
+  --enabled_modalities "T2FLAIR" \
+  --flair_ckpt ckpt/flair.ckpt \
+  --fusion_type masked_mean \
+  --experiment "ablation_flair_only"
 
 
-echo ""
-echo "📊 Phase 2: Critical Pairwise Combinations (Clinically Optimal)"
-echo "---------------------------------------------------------------"
-echo "🏥 Note: DWI+ADC is the gold standard combination for infarct detection"
-echo ""
+# echo ""
+# echo "📊 Phase 2: Critical Pairwise Combinations (Clinically Optimal)"
+# echo "---------------------------------------------------------------"
+# echo "🏥 Note: DWI+ADC is the gold standard combination for infarct detection"
+# echo ""
 
 # echo "🧪 Testing DWI + ADC (gold standard diffusion pair) - Channel Attention..."
 # PYTHONPATH=src python src/finetune.py $COMMON_ARGS \
@@ -85,49 +85,49 @@ echo ""
 #   --fusion_type channel_attention \
 #   --experiment "ablation_dwi_flair"
 
-echo ""
-echo "📊 Phase 3: Three-Modality Optimal Combination"
-echo "----------------------------------------------"
-echo "🏥 Note: Adding T2FLAIR to DWI+ADC for comprehensive infarct assessment"
-echo ""
+# echo ""
+# echo "📊 Phase 3: Three-Modality Optimal Combination"
+# echo "----------------------------------------------"
+# echo "🏥 Note: Adding T2FLAIR to DWI+ADC for comprehensive infarct assessment"
+# echo ""
 
-echo "🧪 Testing DWI + ADC + T2FLAIR (comprehensive infarct detection) - Attention..."
-PYTHONPATH=src python src/finetune.py $COMMON_ARGS \
-  --enabled_modalities "DWI,ADC,T2FLAIR" \
-  --dwi_ckpt ckpt/dwi.ckpt --flair_ckpt ckpt/flair.ckpt \
-  --fusion_type attention \
-  --experiment "ablation_dwi_adc_flair_att"
+# echo "🧪 Testing DWI + ADC + T2FLAIR (comprehensive infarct detection) - Attention..."
+# PYTHONPATH=src python src/finetune.py $COMMON_ARGS \
+#   --enabled_modalities "DWI,ADC,T2FLAIR" \
+#   --dwi_ckpt ckpt/dwi.ckpt --flair_ckpt ckpt/flair.ckpt \
+#   --fusion_type attention \
+#   --experiment "ablation_dwi_adc_flair_att"
 
-echo "🧪 Testing DWI + ADC + T2FLAIR (comprehensive) - Learnable Weighted..."
-PYTHONPATH=src python src/finetune.py $COMMON_ARGS \
-  --enabled_modalities "DWI,ADC,T2FLAIR" \
-  --dwi_ckpt ckpt/dwi.ckpt --flair_ckpt ckpt/flair.ckpt \
-  --fusion_type learnable_weighted \
-  --experiment "ablation_dwi_adc_flair_learnable"
+# echo "🧪 Testing DWI + ADC + T2FLAIR (comprehensive) - Learnable Weighted..."
+# PYTHONPATH=src python src/finetune.py $COMMON_ARGS \
+#   --enabled_modalities "DWI,ADC,T2FLAIR" \
+#   --dwi_ckpt ckpt/dwi.ckpt --flair_ckpt ckpt/flair.ckpt \
+#   --fusion_type learnable_weighted \
+#   --experiment "ablation_dwi_adc_flair_learnable"
 
-echo ""
-echo "📊 Phase 4: All Modalities - Fusion Method Comparison"
-echo "-----------------------------------------------------"
-echo "🏥 Note: Testing all modalities with different fusion approaches"
-echo ""
+# echo ""
+# echo "📊 Phase 4: All Modalities - Fusion Method Comparison"
+# echo "-----------------------------------------------------"
+# echo "🏥 Note: Testing all modalities with different fusion approaches"
+# echo ""
 
-echo "🧪 Testing all modalities with attention fusion..."
-PYTHONPATH=src python src/finetune.py $COMMON_ARGS \
-  --dwi_ckpt ckpt/dwi.ckpt --flair_ckpt ckpt/flair.ckpt --other_ckpt ckpt/other.ckpt \
-  --fusion_type attention \
-  --experiment "ablation_all_attention"
+# echo "🧪 Testing all modalities with attention fusion..."
+# PYTHONPATH=src python src/finetune.py $COMMON_ARGS \
+#   --dwi_ckpt ckpt/dwi.ckpt --flair_ckpt ckpt/flair.ckpt --other_ckpt ckpt/other.ckpt \
+#   --fusion_type attention \
+#   --experiment "ablation_all_attention"
 
-echo "🧪 Testing all modalities with learnable weighted fusion..."
-PYTHONPATH=src python src/finetune.py $COMMON_ARGS \
-  --dwi_ckpt ckpt/dwi.ckpt --flair_ckpt ckpt/flair.ckpt --other_ckpt ckpt/other.ckpt \
-  --fusion_type learnable_weighted \
-  --experiment "ablation_all_learnable"
+# echo "🧪 Testing all modalities with learnable weighted fusion..."
+# PYTHONPATH=src python src/finetune.py $COMMON_ARGS \
+#   --dwi_ckpt ckpt/dwi.ckpt --flair_ckpt ckpt/flair.ckpt --other_ckpt ckpt/other.ckpt \
+#   --fusion_type learnable_weighted \
+#   --experiment "ablation_all_learnable"
 
-echo "🧪 Testing all modalities with hybrid attention fusion..."
-PYTHONPATH=src python src/finetune.py $COMMON_ARGS \
-  --dwi_ckpt ckpt/dwi.ckpt --flair_ckpt ckpt/flair.ckpt --other_ckpt ckpt/other.ckpt \
-  --fusion_type hybrid_attention \
-  --experiment "ablation_all_hybrid"
+# echo "🧪 Testing all modalities with hybrid attention fusion..."
+# PYTHONPATH=src python src/finetune.py $COMMON_ARGS \
+#   --dwi_ckpt ckpt/dwi.ckpt --flair_ckpt ckpt/flair.ckpt --other_ckpt ckpt/other.ckpt \
+#   --fusion_type hybrid_attention \
+#   --experiment "ablation_all_hybrid"
 
 echo ""
 echo "✅ Optimized Infarct Detection Ablation Study Completed!"

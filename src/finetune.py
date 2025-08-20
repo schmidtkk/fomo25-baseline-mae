@@ -13,6 +13,10 @@ from models.supervised_base import BaseSupervisedModel
 from augmentations.finetune_augmentation_presets import (
     get_finetune_augmentation_params,
 )
+from augmentations.anisotropic_augmentation import (
+    get_anisotropic_augmentation_for_task,
+    AnisotropicSpatialTransform,
+)
 from utils.utils import (
     SimplePathConfig,
     setup_seed,
@@ -88,7 +92,8 @@ def main():
         help="Model name defined in models.networks (unet_b, unet_xl, etc.)",
     )
     parser.add_argument("--precision", type=str, default="32-true")
-    parser.add_argument("--patch_size", type=int, default=32)
+    parser.add_argument("--patch_size", type=str, default="32", 
+                        help="Patch size: single int for isotropic (32) or comma-separated for anisotropic (96,96,24)")
     parser.add_argument("--starting_filters", type=int, default=64)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--compile", action="store_true")
@@ -160,7 +165,7 @@ def main():
     parser.add_argument(
         "--augmentation_preset",
         type=str,
-        choices=["all", "basic", "none"],
+        choices=["all", "basic", "anisotropic", "none"],
         default="basic",
     )
     # Training Parameters
@@ -244,9 +249,23 @@ def main():
     )
     args = parser.parse_args()
 
-    assert (
-        args.patch_size % 8 == 0
-    ), f"Patch size must be divisible by 8, got {args.patch_size}"
+    # Parse patch size: support both isotropic (int) and anisotropic (comma-separated)
+    if isinstance(args.patch_size, str):
+        if ',' in args.patch_size:
+            # Anisotropic: "96,96,24" -> (96, 96, 24)
+            patch_size_tuple = tuple(int(x.strip()) for x in args.patch_size.split(','))
+            assert len(patch_size_tuple) == 3, f"Anisotropic patch size must have 3 dimensions, got {len(patch_size_tuple)}"
+        else:
+            # Isotropic: "96" -> (96, 96, 96)
+            patch_size_int = int(args.patch_size)
+            patch_size_tuple = (patch_size_int,) * 3
+    else:
+        # Legacy int support
+        patch_size_tuple = (args.patch_size,) * 3
+    
+    # Validate all dimensions are divisible by 8
+    for i, dim in enumerate(patch_size_tuple):
+        assert dim % 8 == 0, f"Patch size dimension {i} must be divisible by 8, got {dim}"
 
     # Set up task configuration
     task_cfg = get_task_config(args.taskid)
@@ -255,6 +274,17 @@ def main():
     num_classes = task_cfg["num_classes"]
     modalities = len(task_cfg["modalities"])
     labels = task_cfg["labels"]
+    
+    # Use task-specific patch size if not explicitly provided or if using defaults
+    if args.patch_size == "32":  # Default value
+        task_patch_size = task_cfg.get("patch_size", None)
+        if task_patch_size is not None:
+            patch_size_tuple = tuple(task_patch_size)
+            print(f"📐 Using task-specific anisotropic patch size: {patch_size_tuple}")
+        else:
+            print(f"📐 Using default isotropic patch size: {patch_size_tuple}")
+    else:
+        print(f"📐 Using user-specified patch size: {patch_size_tuple}")
 
     # Determine run type: we consider fusion pretrain ckpts as 'finetune'
     has_any_group_ckpt = any(
@@ -491,7 +521,8 @@ def main():
         "batch_size": args.batch_size,
         "val_batch_size": args.val_batch_size,
         "learning_rate": args.learning_rate,
-        "patch_size": (args.patch_size,) * 3,
+        "patch_size": patch_size_tuple,  # Use parsed anisotropic patch size
+        "target_spacing": task_cfg.get("target_spacing", [1.0, 1.0, 1.0]),  # Add spacing config
         "starting_filters": int(args.starting_filters),
         "precision": args.precision,
         "augmentation_preset": args.augmentation_preset,
@@ -648,17 +679,36 @@ def main():
 
 
     # Configure augmentations based on preset
-    aug_params = get_finetune_augmentation_params(args.augmentation_preset)
-    
-    # Map task type for augmentation composer (regression uses same augmentations as classification)
-    aug_task_type = "classification" if task_type in ["classification", "regression"] else task_type
-    
-    augmenter = YuccaAugmentationComposer(
-        patch_size=config["patch_size"],
-        task_type_preset=aug_task_type,
-        parameter_dict=aug_params,
-        deep_supervision=False,
-    )
+    if args.augmentation_preset == "anisotropic":
+        # Use anisotropic augmentation system for non-isotropic data
+        logging.info(f"Using anisotropic augmentations for task: {task_name}")
+        
+        # Extract task number from task_name (e.g., "Task001_FOMO1" -> 1)
+        task_id = int(task_name.split('_')[-1][-1])  # Get last character and convert to int
+        
+        anisotropic_augmenter = get_anisotropic_augmentation_for_task(
+            task_id=task_id,
+            patch_size=config["patch_size"],
+            spacing=config.get("target_spacing")
+        )
+        
+        train_transforms = anisotropic_augmenter.train_transforms
+        val_transforms = anisotropic_augmenter.val_transforms
+    else:
+        # Use yucca augmentation system for standard training
+        aug_params = get_finetune_augmentation_params(args.augmentation_preset)
+        
+        # Map task type for augmentation composer (regression uses same augmentations as classification)
+        aug_task_type = "classification" if task_type in ["classification", "regression"] else task_type
+        
+        augmenter = YuccaAugmentationComposer(
+            patch_size=config["patch_size"],
+            task_type_preset=aug_task_type,
+            parameter_dict=aug_params,
+            deep_supervision=False,
+        )
+        train_transforms = augmenter.train_transforms
+        val_transforms = augmenter.val_transforms
 
     # Create the data module that handles loading and batching
     # Choose dataset class: FusionCLSDataset if folder-style fusion preprocessing detected
@@ -666,8 +716,8 @@ def main():
 
     data_module = YuccaDataModule(
         train_dataset_class=dataset_cls,  # Supports both stacked and per-modality fusion
-        composed_train_transforms=augmenter.train_transforms,
-        composed_val_transforms=augmenter.val_transforms,
+        composed_train_transforms=train_transforms,
+        composed_val_transforms=val_transforms,
         patch_size=config["patch_size"],
         batch_size=config["batch_size"],
         train_data_dir=(train_data_dir if dataset_cls is CLSDataset else fusion_dir),

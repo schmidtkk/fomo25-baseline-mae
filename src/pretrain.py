@@ -52,9 +52,9 @@ def main():
     parser.add_argument("--mask_ratio", type=float, default=0.6)
     parser.add_argument(
         "--patch_size",
-        type=int,
-        default=64,
-        help="The patch size of the 3D patches extracted from the whole volume.",
+        type=str,
+        default="64",
+        help="Patch size: single int for isotropic (64) or comma-separated for anisotropic (96,96,24)",
     )
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
@@ -76,7 +76,7 @@ def main():
     parser.add_argument(
         "--augmentation_preset",
         type=str,
-        choices=["all", "basic", "none"],
+        choices=["all", "basic", "none", "anisotropic"],
         default="none",
     )
     parser.add_argument("--loss_masked_tokens_only", default=False, action="store_true")
@@ -115,16 +115,49 @@ def main():
 
     args = parser.parse_args()
 
-    assert args.patch_size % 8 == 0, args.patch_size
-    assert args.mask_patch_size < args.patch_size
+    # Parse patch size: support both isotropic (int) and anisotropic (comma-separated)
+    if isinstance(args.patch_size, str):
+        if ',' in args.patch_size:
+            # Anisotropic: "96,96,24" -> (96, 96, 24)
+            patch_size_tuple = tuple(int(x.strip()) for x in args.patch_size.split(','))
+            assert len(patch_size_tuple) == 3, f"Anisotropic patch size must have 3 dimensions, got {len(patch_size_tuple)}"
+        else:
+            # Isotropic: "96" -> (96, 96, 96)
+            patch_size_int = int(args.patch_size)
+            patch_size_tuple = (patch_size_int,) * 3
+    else:
+        # Legacy int support (shouldn't happen with current arg parser, but defensive)
+        patch_size_tuple = (args.patch_size,) * 3
+    
+    # Validate all dimensions are divisible by 8 AND mask_patch_size
+    for i, dim in enumerate(patch_size_tuple):
+        assert dim % 8 == 0, f"Patch size dimension {i} must be divisible by 8, got {dim}"
+        assert dim % args.mask_patch_size == 0, f"Patch size dimension {i} must be divisible by mask_patch_size {args.mask_patch_size}, got {dim}"
+
+    assert args.mask_patch_size < min(patch_size_tuple), f"mask_patch_size {args.mask_patch_size} must be smaller than minimum patch dimension {min(patch_size_tuple)}"
+
+    # Calculate anisotropy ratio for logging
+    max_dim = max(patch_size_tuple)
+    min_dim = min(patch_size_tuple)
+    anisotropy_ratio = max_dim / min_dim if min_dim > 0 else 1.0
 
     # Concise startup summary
     logging.info(
-        f"[STARTUP] Experiment: {args.experiment} | Modality: {args.modality_mode} | Model: {args.model_name} | Patch: {args.patch_size} | Batch: {args.batch_size} | Devices: {args.num_devices} | Workers: {args.num_workers}"
+        f"[STARTUP] Experiment: {args.experiment} | Modality: {args.modality_mode} | Model: {args.model_name} | Patch: {patch_size_tuple} | Batch: {args.batch_size} | Devices: {args.num_devices} | Workers: {args.num_workers}"
     )
     logging.info(
         f"[STARTUP] Data dir: {args.pretrain_data_dir} | Save dir: {args.save_dir} | Precision: {args.precision}"
     )
+    
+    # Log anisotropic configuration details
+    if anisotropy_ratio > 1.1:  # Threshold for considering anisotropic
+        logging.info(f"[ANISOTROPIC] Detected anisotropic patch size with ratio: {anisotropy_ratio:.2f}")
+        logging.info(f"[ANISOTROPIC] Using anisotropic-aware processing for modality: {args.modality_mode}")
+        if args.augmentation_preset == "anisotropic":
+            logging.info(f"[ANISOTROPIC] Anisotropic augmentations enabled")
+    else:
+        logging.info(f"[ISOTROPIC] Using isotropic patch size configuration")
+    
     logging.debug(f"Using num_workers: {args.num_workers}, num_devices: {args.num_devices}")
     logging.debug(f"ARGS: {args}")
 
@@ -172,7 +205,7 @@ def main():
         # Reproducibility
         "seed": seed,
         # Model parameters
-        "patch_size": (args.patch_size,) * 3,
+        "patch_size": patch_size_tuple,
         "mask_patch_size": args.mask_patch_size,
         "mask_ratio": args.mask_ratio,
         "input_channels": 1,

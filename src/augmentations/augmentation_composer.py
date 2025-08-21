@@ -20,13 +20,16 @@ from yucca.modules.data.augmentation.transforms.Spatial import Spatial
 
 
 def get_pretrain_augmentations(patch_size, preset):
-    assert preset in ["none", "spatial", "all"]
+    assert preset in ["none", "spatial", "all", "anisotropic"]
 
     if preset == "none":
         augmentations = [CopyImageToLabel(copy=True)]
 
     elif preset == "spatial":
         augmentations = [spatial_augmentation(patch_size), CopyImageToLabel(copy=True)]
+    
+    elif preset == "anisotropic":
+        augmentations = [anisotropic_spatial_augmentation(patch_size), CopyImageToLabel(copy=True)]
 
     elif preset == "all":
         augmentations = [
@@ -81,6 +84,45 @@ def spatial_augmentation(patch_size):
         skip_label=True,
         clip_to_input_range=True,
     )
+
+
+def anisotropic_spatial_augmentation(patch_size):
+    """
+    Create anisotropic-aware spatial augmentation for pretraining.
+    
+    Uses conservative parameters suitable for mixed-modality pretraining data.
+    Detects anisotropy and adjusts parameters accordingly.
+    """
+    # Calculate anisotropy ratio to determine if special handling is needed
+    max_dim = max(patch_size)
+    min_dim = min(patch_size)
+    anisotropy_ratio = max_dim / min_dim if min_dim > 0 else 1.0
+    
+    if anisotropy_ratio > 2.0:  # Anisotropic data detected
+        return Spatial(
+            patch_size=patch_size,
+            crop=True,
+            random_crop=False,
+            cval="min",
+            # Conservative deformation for thick-slice data
+            p_deform_per_sample=0.2,  # Reduced from 0.33
+            deform_sigma=(15, 25),    # Reduced from (20, 30)
+            deform_alpha=(150, 400),  # Reduced from (200, 600)
+            # Axis-aware rotation (reduced for through-plane)
+            p_rot_per_sample=0.15,    # Reduced from 0.2
+            p_rot_per_axis=0.5,       # Reduced from 0.66
+            x_rot_in_degrees=(-15.0, 15.0),  # Reduced from (-30, 30)
+            y_rot_in_degrees=(-15.0, 15.0),  # Reduced from (-30, 30) 
+            z_rot_in_degrees=(-20.0, 20.0),  # Slightly reduced
+            # Conservative scaling for through-plane axis
+            p_scale_per_sample=0.15,  # Reduced from 0.2
+            scale_factor=(0.95, 1.05), # More conservative than (0.9, 1.1)
+            skip_label=True,
+            clip_to_input_range=True,
+        )
+    else:
+        # Use standard parameters for isotropic data
+        return spatial_augmentation(patch_size)
 
 
 def intensity_augmentations():

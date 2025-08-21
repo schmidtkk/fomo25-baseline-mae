@@ -137,15 +137,22 @@ class CorrectedDiceCE(nn.Module):
 
 def get_dice_coefficient(predictions, targets, smooth=1e-5):
     """
-    Compute dice coefficient for monitoring (not for loss).
+    DEPRECATED: Compute dice coefficient for monitoring (not for loss).
+    
+    WARNING: This function is deprecated and should not be used for validation metrics.
+    It computes Dice on single batches only and includes smoothing bias.
+    
+    Use torchmetrics.Dice instead for proper validation metrics:
+        from torchmetrics.classification import Dice
+        dice_metric = Dice(num_classes=2, ignore_index=0, average='macro')
     
     Args:
         predictions: Model logits [B, num_classes, D, H, W]
         targets: Ground truth [B, D, H, W] or [B, 1, D, H, W]
-        smooth: Smoothing factor
+        smooth: Smoothing factor (causes bias in validation assessment)
         
     Returns:
-        Dice coefficient (0.0 to 1.0)
+        Dice coefficient (0.0 to 1.0) - NOT suitable for validation metrics
     """
     # Handle target dimensions
     if targets.dim() == 5 and targets.size(1) == 1:

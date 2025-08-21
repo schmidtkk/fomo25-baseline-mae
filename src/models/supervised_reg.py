@@ -1,5 +1,7 @@
-from typing import Optional
+from typing import Optional, Dict, List
 import torch
+import os
+import logging
 from torchmetrics import MetricCollection
 from torchmetrics.regression import MeanAbsoluteError, PearsonCorrCoef
 
@@ -30,11 +32,14 @@ class SupervisedRegModel(BaseSupervisedModel):
         eps: float = 1e-8,
         betas: tuple = (0.9, 0.999),
     ):
+        # Store config for TTA and other needs (PyTorch Lightning seems to lose self.config)
+        self._reg_config = dict(config) if config else {}
+        
         # Store loss type from config for brain age regression optimization
-        self.loss_type = config.get("loss_type", "mse")  # mse, mae, huber
-        self.age_normalization = config.get("age_normalization", True)
-        self.age_mean = config.get("age_mean", 50.0)  # Approximate brain age mean
-        self.age_std = config.get("age_std", 15.0)   # Approximate brain age std
+        self.loss_type = self._reg_config.get("loss_type", "mse")  # mse, mae, huber
+        self.age_normalization = self._reg_config.get("age_normalization", True)
+        self.age_mean = self._reg_config.get("age_mean", 50.0)  # Approximate brain age mean
+        self.age_std = self._reg_config.get("age_std", 15.0)   # Approximate brain age std
         
         super().__init__(
             config=config,
@@ -54,6 +59,144 @@ class SupervisedRegModel(BaseSupervisedModel):
         # Dedicated Pearson correlation metrics per phase (epoch-level)
         self.pearson_train = PearsonCorrCoef()
         self.pearson_val = PearsonCorrCoef()
+
+    def on_validation_epoch_start(self):
+        """Initialize TTA configuration for validation epoch - adapted from SupervisedClsModel"""
+        # Ensure loss functions are configured if not already done
+        if not hasattr(self, 'loss_fn_val'):
+            self.loss_fn_train, self.loss_fn_val = self._configure_losses()
+        
+        # TTA configuration for regression validation using stored config
+        # Use setattr to ensure PyTorch Lightning doesn't interfere
+        setattr(self, '_val_tta_enable', bool(self._reg_config.get("val_tta_enable", False)))
+        setattr(self, '_val_tta_views', int(self._reg_config.get("val_tta_views", 1)))
+        
+        # Precompute flip codes (up to 8: none, x, y, z, xy, xz, yz, xyz)
+        tta_codes = [
+            (), (2,), (3,), (4,), (2,3), (2,4), (3,4), (2,3,4)
+        ][: max(1, min(8, self._val_tta_views))]
+        setattr(self, '_tta_codes', tta_codes)
+        
+        # Deterministic translation offsets (center + axis shifts)
+        val_tta_offsets = int(self._reg_config.get("val_tta_offsets", 1))
+        val_tta_offset_frac = float(self._reg_config.get("val_tta_offset_frac", 0.25))
+        setattr(self, '_val_tta_offsets', val_tta_offsets)
+        setattr(self, '_val_tta_offset_frac', val_tta_offset_frac)
+        
+        # Build offsets: center, +/- along each axis (up to 7 total)
+        base = [(0, 0, 0)]
+        shifts = [(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)]
+        tta_offsets = base + shifts
+        tta_offsets = tta_offsets[: max(1, min(7, val_tta_offsets))]
+        setattr(self, '_tta_offsets', tta_offsets)
+
+    def validation_step(self, batch, _batch_idx):
+        """Validation step with TTA support for regression tasks"""
+        # Ensure TTA state exists for unit tests that call validation_step directly
+        if not hasattr(self, "_val_tta_enable"):
+            self.on_validation_epoch_start()
+            
+        inputs, target, file_path = self._process_batch(batch)
+        
+        # Apply TTA if enabled, otherwise use standard forward pass
+        if not self._val_tta_enable or (len(self._tta_codes) == 1 and len(self._tta_offsets) == 1):
+            output = self(inputs)
+        else:
+            output = self._compute_tta_prediction(inputs)
+        
+        # Fix tensor shape mismatch for regression tasks
+        if output.dim() > 1 and output.size(-1) == 1:
+            output = output.squeeze(-1)
+            
+        loss = self.loss_fn_val(output, target)
+        
+        # Validate loss is finite
+        if not torch.isfinite(loss):
+            print(f"WARNING: Non-finite validation loss detected: {loss}")
+            loss = torch.tensor(0.0, device=loss.device)
+        
+        metrics = self.compute_metrics(self.val_metrics, output, target)
+        self.log_dict(
+            {"val/loss": loss} | metrics,
+            prog_bar=self.progress_bar,
+            logger=True,
+        )
+
+    def _compute_tta_prediction(self, inputs):
+        """Compute TTA prediction by averaging across augmented views for regression"""
+        B, M, D, H, W = inputs.shape
+        dz = int(round(self._val_tta_offset_frac * D))
+        dy = int(round(self._val_tta_offset_frac * H))
+        dx = int(round(self._val_tta_offset_frac * W))
+        
+        # Use smaller batch size for regression models (they tend to be memory-intensive)
+        combos_per_step = int(max(1, self._reg_config.get("val_tta_batch_size", 4)))
+        
+        # Build list of combo tuples to avoid holding all tensors at once
+        combo_tuples = []
+        for oz, oy, ox in self._tta_offsets:
+            for code in self._tta_codes:
+                combo_tuples.append((oz, oy, ox, code))
+        
+        total_combos = len(combo_tuples)
+        sum_preds = None
+        processed = 0
+        i = 0
+        
+        while i < total_combos:
+            # Determine group size and build a stacked mini-batch
+            g = min(combos_per_step, total_combos - i)
+            
+            # Build mini-batch on-the-fly to limit memory usage
+            mini = []
+            for j in range(g):
+                oz, oy, ox, code = combo_tuples[i + j]
+                x = torch.roll(inputs, shifts=(oz * dz, oy * dy, ox * dx), dims=(2, 3, 4))
+                if len(code) > 0:
+                    x = torch.flip(x, dims=list(code))
+                mini.append(x)
+            
+            try:
+                X = torch.cat(mini, dim=0)  # [g*B, M, D, H, W]
+                preds = self(X)             # [g*B, C] where C=1 for regression
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower() and combos_per_step > 1:
+                    # Reduce group size and retry without crashing validation
+                    combos_per_step = max(1, combos_per_step // 2)
+                    continue
+                raise
+            
+            # Handle regression output shape
+            if preds.dim() > 1 and preds.size(-1) == 1:
+                preds = preds.squeeze(-1)  # [g*B]
+            
+            # Initialize sum_preds with correct shape
+            if sum_preds is None:
+                if preds.dim() == 1:
+                    sum_preds = torch.zeros(B, device=preds.device, dtype=preds.dtype)
+                else:
+                    sum_preds = torch.zeros(B, preds.size(-1), device=preds.device, dtype=preds.dtype)
+            
+            # Reshape predictions and sum over group dimension
+            if preds.dim() == 1:
+                preds = preds.view(g, B)  # [g, B]
+                preds_sum = preds.sum(dim=0)  # [B]
+            else:
+                preds = preds.view(g, B, -1)  # [g, B, C]
+                preds_sum = preds.sum(dim=0)  # [B, C]
+            
+            sum_preds = sum_preds + preds_sum
+            processed += g
+            i += g
+        
+        # Average over all combos
+        avg_preds = sum_preds / float(max(1, processed))
+        
+        # Ensure output shape matches regular forward pass
+        if avg_preds.dim() == 1:
+            avg_preds = avg_preds.unsqueeze(-1)  # [B] -> [B, 1] for regression
+        
+        return avg_preds
 
     def _configure_metrics(self, prefix: str):
         """
@@ -78,7 +221,6 @@ class SupervisedRegModel(BaseSupervisedModel):
         if self.loss_type == "mae":
             # MAE loss - more robust to age outliers than MSE
             loss_fn = torch.nn.L1Loss()
-            import logging
             logging.info("Using MAE loss for robust brain age regression")
         elif self.loss_type == "huber":
             # Huber loss - combines MSE and MAE benefits

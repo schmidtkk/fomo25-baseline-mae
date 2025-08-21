@@ -508,11 +508,12 @@ class BaseSupervisedModel(L.LightningModule):
         
         loss = self.loss_fn_train(output, target_for_loss)
         
-        # Debug: Log dice coefficient and validate loss for segmentation tasks
-        if hasattr(self, 'task_type') and self.task_type == "segmentation":
-            from models.losses import get_dice_coefficient
-            dice_coeff = get_dice_coefficient(output, target)
-            self.log("train/dice_debug", dice_coeff, on_step=True, on_epoch=True, prog_bar=False)
+        # DEPRECATED: train/dice_debug metric removed to avoid confusion
+        # Use train/dice from torchmetrics instead - it's properly computed and aggregated
+        # if hasattr(self, 'task_type') and self.task_type == "segmentation":
+        #     from models.losses import get_dice_coefficient
+        #     dice_coeff = get_dice_coefficient(output, target)
+        #     self.log("train/dice_debug", dice_coeff, on_step=True, on_epoch=True, prog_bar=False)
         
         # Validate loss is finite
         if not torch.isfinite(loss):
@@ -567,11 +568,12 @@ class BaseSupervisedModel(L.LightningModule):
             
         loss = self.loss_fn_val(output, target_for_loss)
         
-        # Debug: Log dice coefficient and validate loss for segmentation tasks
-        if hasattr(self, 'task_type') and self.task_type == "segmentation":
-            from models.losses import get_dice_coefficient
-            dice_coeff = get_dice_coefficient(output, target)
-            self.log("val/dice_debug", dice_coeff, on_step=False, on_epoch=True, prog_bar=False)
+        # DEPRECATED: val/dice_debug metric removed to avoid confusion
+        # Use val/dice from torchmetrics instead - it's properly aggregated across all validation batches
+        # if hasattr(self, 'task_type') and self.task_type == "segmentation":
+        #     from models.losses import get_dice_coefficient
+        #     dice_coeff = get_dice_coefficient(output, target)
+        #     self.log("val/dice_debug", dice_coeff, on_step=False, on_epoch=True, prog_bar=False)
         
         # Validate loss is finite
         if not torch.isfinite(loss):

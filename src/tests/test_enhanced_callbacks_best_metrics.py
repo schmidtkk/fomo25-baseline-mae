@@ -260,9 +260,9 @@ class TestLossPlottingCallbackBestMetrics(unittest.TestCase):
     @patch('matplotlib.pyplot.subplots')
     def test_save_plots_with_best_metrics(self, mock_subplots, mock_savefig):
         """Test that plots are saved with best metrics annotations."""
-        # Mock matplotlib components
+        # Mock matplotlib components - Updated for 2x3 layout
         mock_fig = Mock()
-        mock_axes = [[Mock(), Mock()], [Mock(), Mock()]]
+        mock_axes = [[Mock(), Mock(), Mock()], [Mock(), Mock(), Mock()]]  # 2x3 layout
         mock_subplots.return_value = (mock_fig, mock_axes)
         
         # Set up some data for plotting

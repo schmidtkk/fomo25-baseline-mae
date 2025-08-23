@@ -192,11 +192,48 @@ class SupervisedRegModel(BaseSupervisedModel):
         # Average over all combos
         avg_preds = sum_preds / float(max(1, processed))
         
-        # Ensure output shape matches regular forward pass
-        if avg_preds.dim() == 1:
-            avg_preds = avg_preds.unsqueeze(-1)  # [B] -> [B, 1] for regression
-        
+        # Ensure output shape matches regular forward pass - keep as [B] for regression
+        # No need to add dimension back, loss functions expect [B] shape
         return avg_preds
+
+    def forward(self, inputs):
+        """Forward pass with shape handling for regression tasks"""
+        output = super().forward(inputs)
+        
+        # Fix tensor shape for regression: [B, 1] -> [B]
+        if output.dim() > 1 and output.size(-1) == 1:
+            output = output.squeeze(-1)
+            
+        return output
+
+    def training_step(self, batch, _batch_idx):
+        """Training step with shape handling for regression tasks"""
+        # Ensure loss functions are configured
+        if not hasattr(self, 'loss_fn_train'):
+            self.loss_fn_train, self.loss_fn_val = self._configure_losses()
+            
+        inputs, target, _ = self._process_batch(batch)
+        output = self(inputs)
+        
+        # Fix tensor shape mismatch for regression tasks
+        if output.dim() > 1 and output.size(-1) == 1:
+            output = output.squeeze(-1)  # [B, 1] -> [B]
+            
+        loss = self.loss_fn_train(output, target)
+        
+        # Validate loss is finite
+        if not torch.isfinite(loss):
+            print(f"WARNING: Non-finite training loss detected: {loss}")
+            loss = torch.tensor(0.0, device=loss.device, requires_grad=True)
+            
+        metrics = self.compute_metrics(self.train_metrics, output, target)
+        self.log_dict(
+            {"train/loss": loss} | metrics,
+            prog_bar=self.progress_bar,
+            logger=True,
+        )
+        
+        return loss
 
     def _configure_metrics(self, prefix: str):
         """
@@ -297,7 +334,7 @@ class SupervisedRegModel(BaseSupervisedModel):
             # Log MAE
             vals = self.train_metrics.compute()
             for k, v in vals.items():
-                self.log(k, v, prog_bar=False, logger=True)
+                self.log(k, v, prog_bar=False, logger=True, sync_dist=True)
 
             # Log Pearson corr using dedicated metric
             if hasattr(self, "pearson_train"):
@@ -325,7 +362,7 @@ class SupervisedRegModel(BaseSupervisedModel):
             # Log MAE
             vals = self.val_metrics.compute()
             for k, v in vals.items():
-                self.log(k, v, prog_bar=False, logger=True)
+                self.log(k, v, prog_bar=False, logger=True, sync_dist=True)
 
             # Log Pearson corr using dedicated metric
             if hasattr(self, "pearson_val"):

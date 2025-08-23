@@ -237,6 +237,9 @@ class EnhancedModelCheckpoint(ModelCheckpoint):
                 val_loss = current_metrics['val/loss']
                 best_val_loss = self.best_metrics['val/loss']['value']
                 logging.info("val/loss: %.6f (best: %.6f)%s", val_loss, best_val_loss, " new" if val_loss <= best_val_loss else "")
+        
+        # Always create/update comprehensive metrics file when checkpoint is saved
+        self._create_comprehensive_metrics_file(trainer, filepath, current_metrics)
             
     def _get_current_metrics(self, trainer: Trainer) -> Dict[str, float]:
         """Extract current metrics from trainer."""
@@ -273,6 +276,90 @@ class EnhancedModelCheckpoint(ModelCheckpoint):
         else:  # mode == "max"
             return current_value > self.best_metric_value
 
+    def _create_comprehensive_metrics_file(self, trainer: Trainer, checkpoint_filepath: str, current_metrics: dict) -> None:
+        """Create a comprehensive metrics.txt file for the checkpoint."""
+        checkpoint_dir = os.path.dirname(checkpoint_filepath)
+        metrics_file_path = os.path.join(checkpoint_dir, 'metrics.txt')
+        
+        try:
+            with open(metrics_file_path, 'w') as f:
+                # Header
+                f.write("="*60 + "\n")
+                f.write("CHECKPOINT METRICS SUMMARY\n")
+                f.write("="*60 + "\n\n")
+                
+                # Basic checkpoint info
+                f.write("Checkpoint Information:\n")
+                f.write("-" * 30 + "\n")
+                f.write(f"Checkpoint File: {os.path.basename(checkpoint_filepath)}\n")
+                f.write(f"Epoch: {trainer.current_epoch}\n")
+                f.write(f"Global Step: {trainer.global_step}\n")
+                f.write(f"Created: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+                
+                # Monitor metric info
+                f.write("Primary Monitor Metric:\n")
+                f.write("-" * 30 + "\n")
+                f.write(f"Monitor: {self.monitor}\n")
+                monitor_value = current_metrics.get(self.monitor, 'N/A')
+                f.write(f"Current Value: {monitor_value}\n")
+                if self.monitor in self.best_metrics:
+                    f.write(f"Best Value: {self.best_metrics[self.monitor]['value']:.6f}\n")
+                    f.write(f"Best Epoch: {self.best_metrics[self.monitor]['epoch']}\n")
+                f.write(f"Mode: {self.mode}\n\n")
+                
+                # Current metrics at this checkpoint
+                f.write("Current Metrics (This Checkpoint):\n")
+                f.write("-" * 30 + "\n")
+                for metric_name, metric_value in sorted(current_metrics.items()):
+                    if metric_value is not None:
+                        f.write(f"{metric_name}: {metric_value:.6f}\n")
+                f.write("\n")
+                
+                # Best metrics achieved so far
+                if self.best_metrics:
+                    f.write("Best Metrics Achieved (All Time):\n")
+                    f.write("-" * 30 + "\n")
+                    for metric_name, best_info in sorted(self.best_metrics.items()):
+                        f.write(f"{metric_name}:\n")
+                        f.write(f"  Best Value: {best_info['value']:.6f}\n")
+                        f.write(f"  Best Epoch: {best_info['epoch']}\n")
+                        f.write(f"  Best Step: {best_info.get('step', 'N/A')}\n")
+                        f.write(f"  Mode: {best_info['mode']}\n")
+                        
+                        # Show if this checkpoint achieves the best for this metric
+                        current_value = current_metrics.get(metric_name)
+                        if current_value is not None:
+                            is_current_best = abs(current_value - best_info['value']) < 1e-8
+                            if is_current_best:
+                                f.write(f"  ★ THIS CHECKPOINT ACHIEVES BEST VALUE\n")
+                        f.write("\n")
+                
+                # Training configuration
+                if hasattr(trainer, 'datamodule') and trainer.datamodule is not None:
+                    f.write("Training Configuration:\n")
+                    f.write("-" * 30 + "\n")
+                    dm = trainer.datamodule
+                    if hasattr(dm, 'task_name'):
+                        f.write(f"Task: {dm.task_name}\n")
+                    if hasattr(dm, 'modality'):
+                        f.write(f"Modality: {dm.modality}\n")
+                    if hasattr(dm, 'batch_size'):
+                        f.write(f"Batch Size: {dm.batch_size}\n")
+                    f.write("\n")
+                
+                # Model information
+                if hasattr(trainer.model, '__class__'):
+                    f.write("Model Information:\n")
+                    f.write("-" * 30 + "\n")
+                    f.write(f"Model Class: {trainer.model.__class__.__name__}\n")
+                    if hasattr(trainer.model, 'learning_rate'):
+                        f.write(f"Learning Rate: {trainer.model.learning_rate}\n")
+                    f.write("\n")
+                
+            logging.info(f"Comprehensive metrics file created: {metrics_file_path}")
+        except Exception as e:
+            logging.warning(f"Failed to create comprehensive metrics file: {e}")
+
 
 class LossPlottingCallback(Callback):
     """
@@ -284,6 +371,8 @@ class LossPlottingCallback(Callback):
     - Configurable figure size and saving directory
     - Window smoothing for noisy loss curves
     - Best metrics annotations and horizontal lines
+    - Learning rate visualization with log scale
+    - 2x3 subplot layout with comprehensive metrics
     - Robust error handling to avoid training interruption
     """
     
@@ -291,7 +380,7 @@ class LossPlottingCallback(Callback):
                  plot_every_n_epochs: int = 10,
                  log_every_n_steps: int = 50,
                  save_dir: str = "training_plots",
-                 figure_size: Tuple[int, int] = (15, 10),
+                 figure_size: Tuple[int, int] = (18, 10),  # Updated for 2x3 layout
                  enable_plotting: bool = True,
                  smoothing_window: int = 10,
                  best_metrics_file: str = None):
@@ -326,6 +415,8 @@ class LossPlottingCallback(Callback):
         self.val_aurocs = []
         self.train_steps = []
         self.val_steps = []
+        self.learning_rates = []
+        self.lr_steps = []
         
     def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
         """Setup callback to find best metrics file if not provided."""
@@ -449,8 +540,18 @@ class LossPlottingCallback(Callback):
                     loss_value = float(trainer.logged_metrics['train/loss'].item())
                     self.train_losses.append(loss_value)
                     self.train_steps.append(trainer.global_step)
+                
+                # Collect learning rate from optimizer
+                if trainer.optimizers and len(trainer.optimizers) > 0:
+                    optimizer = trainer.optimizers[0]  # Get first (usually only) optimizer
+                    if optimizer.param_groups and len(optimizer.param_groups) > 0:
+                        # Get the learning rate from the first parameter group
+                        # If multiple groups exist, we'll use the first one (typically head params)
+                        current_lr = optimizer.param_groups[0]['lr']
+                        self.learning_rates.append(current_lr)
+                        self.lr_steps.append(trainer.global_step)
             except Exception as e:
-                logging.debug(f"Failed to collect training loss: {e}")
+                logging.debug(f"Failed to collect training metrics: {e}")
                 
             # Note: Training AUROC is typically not computed per batch, only per epoch
             # We'll collect it in on_train_epoch_end instead
@@ -508,8 +609,8 @@ class LossPlottingCallback(Callback):
                 logging.debug("No loss data available for plotting")
                 return
                 
-            # Create figure with subplots
-            fig, axes = plt.subplots(2, 2, figsize=self.figure_size)
+            # Create figure with subplots - adding learning rate subplot
+            fig, axes = plt.subplots(2, 3, figsize=self.figure_size)  # Use configurable figure size
             fig.suptitle(f'Training Progress - Epoch {epoch}{" (Final)" if final else ""}', fontsize=16)
             
             # Plot 1: Training Loss
@@ -573,9 +674,35 @@ class LossPlottingCallback(Callback):
             else:
                 ax2.text(0.5, 0.5, 'No validation loss data', ha='center', va='center', transform=ax2.transAxes)
                 ax2.set_title('Validation Loss')
+
+            # Plot 3: Learning Rate (moved to top right for better visibility)
+            ax3 = axes[0][2]
+            if self.learning_rates and len(self.learning_rates) > 0:
+                # Ensure we have corresponding steps
+                lr_steps_to_plot = self.lr_steps[:len(self.learning_rates)]
+                lr_to_plot = self.learning_rates[:len(lr_steps_to_plot)]
+                if len(lr_steps_to_plot) == len(lr_to_plot) and len(lr_steps_to_plot) > 0:
+                    ax3.plot(lr_steps_to_plot, lr_to_plot, 'm-', linewidth=2, alpha=0.8, label='Learning Rate')
+                    ax3.set_xlabel('Global Step')
+                    ax3.set_ylabel('Learning Rate')
+                    ax3.set_title('Learning Rate Schedule')
+                    ax3.set_yscale('log')  # Log scale for better visualization
+                    ax3.grid(True, alpha=0.3)
+                    ax3.legend()
+                    
+                    # Add current LR annotation
+                    current_lr = lr_to_plot[-1]
+                    ax3.text(0.02, 0.98, f'Current LR: {current_lr:.2e}', 
+                            transform=ax3.transAxes, verticalalignment='top',
+                            bbox=dict(boxstyle="round,pad=0.3", facecolor="yellow", alpha=0.7))
+                else:
+                    ax3.text(0.5, 0.5, 'Learning rate data misaligned', ha='center', va='center', transform=ax3.transAxes)
+            else:
+                ax3.text(0.5, 0.5, 'Learning rate not available', ha='center', va='center', transform=ax3.transAxes)
+                ax3.set_title('Learning Rate Schedule')
                 
-            # Plot 3: Combined Loss
-            ax3 = axes[1][0]
+            # Plot 4: Combined Loss (moved to bottom left)
+            ax4 = axes[1][0]
             has_train_data = self.train_losses and len(self.train_losses) > 0
             has_val_data = self.val_losses and len(self.val_losses) > 0
             
@@ -585,84 +712,91 @@ class LossPlottingCallback(Callback):
                 train_losses_safe = self.train_losses[:len(train_steps_safe)]
                 if len(train_steps_safe) == len(train_losses_safe) and len(train_steps_safe) > 0:
                     # Raw training data
-                    ax3.plot(train_steps_safe, train_losses_safe, 'b-', alpha=0.3, linewidth=0.8, label='Raw Training')
+                    ax4.plot(train_steps_safe, train_losses_safe, 'b-', alpha=0.3, linewidth=0.8, label='Raw Training')
                     # Smoothed training data
                     if len(train_losses_safe) > self.smoothing_window:
                         smoothed_train = self._smooth_data(train_losses_safe)
-                        ax3.plot(train_steps_safe, smoothed_train, 'b-', alpha=0.8, linewidth=2, label='Smoothed Training')
+                        ax4.plot(train_steps_safe, smoothed_train, 'b-', alpha=0.8, linewidth=2, label='Smoothed Training')
                 
                 # Plot validation loss
                 val_steps_safe = self.val_steps[:len(self.val_losses)]
                 val_losses_safe = self.val_losses[:len(val_steps_safe)]
                 if len(val_steps_safe) == len(val_losses_safe) and len(val_steps_safe) > 0:
                     # Raw validation data
-                    ax3.plot(val_steps_safe, val_losses_safe, 'r-', alpha=0.3, linewidth=0.8, label='Raw Validation')
+                    ax4.plot(val_steps_safe, val_losses_safe, 'r-', alpha=0.3, linewidth=0.8, label='Raw Validation')
                     # Smoothed validation data
                     if len(val_losses_safe) > self.smoothing_window:
                         smoothed_val = self._smooth_data(val_losses_safe)
-                        ax3.plot(val_steps_safe, smoothed_val, 'r-', alpha=0.8, linewidth=2, label='Smoothed Validation')
+                        ax4.plot(val_steps_safe, smoothed_val, 'r-', alpha=0.8, linewidth=2, label='Smoothed Validation')
                     
-                ax3.set_xlabel('Global Step')
-                ax3.set_ylabel('Loss')
-                ax3.set_title('Training vs Validation Loss (Smoothed)')
-                ax3.grid(True, alpha=0.3)
-                ax3.legend()
+                ax4.set_xlabel('Global Step')
+                ax4.set_ylabel('Loss')
+                ax4.set_title('Training vs Validation Loss (Smoothed)')
+                ax4.grid(True, alpha=0.3)
+                ax4.legend()
                 
                 # Add best validation loss annotation to combined plot
-                self._add_best_metrics_annotation(ax3, 'val/loss', val_steps_safe)
+                self._add_best_metrics_annotation(ax4, 'val/loss', val_steps_safe)
             elif has_train_data:
                 train_steps_safe = self.train_steps[:len(self.train_losses)]
                 train_losses_safe = self.train_losses[:len(train_steps_safe)]
                 if len(train_steps_safe) == len(train_losses_safe) and len(train_steps_safe) > 0:
-                    ax3.plot(train_steps_safe, train_losses_safe, 'b-', alpha=0.3, linewidth=0.8, label='Raw Training')
+                    ax4.plot(train_steps_safe, train_losses_safe, 'b-', alpha=0.3, linewidth=0.8, label='Raw Training')
                     if len(train_losses_safe) > self.smoothing_window:
                         smoothed_train = self._smooth_data(train_losses_safe)
-                        ax3.plot(train_steps_safe, smoothed_train, 'b-', alpha=0.8, linewidth=2, label='Smoothed Training')
-                ax3.set_xlabel('Global Step')
-                ax3.set_ylabel('Loss')
-                ax3.set_title('Training Loss Only')
-                ax3.grid(True, alpha=0.3)
-                ax3.legend()
+                        ax4.plot(train_steps_safe, smoothed_train, 'b-', alpha=0.8, linewidth=2, label='Smoothed Training')
+                ax4.set_xlabel('Global Step')
+                ax4.set_ylabel('Loss')
+                ax4.set_title('Training Loss Only')
+                ax4.grid(True, alpha=0.3)
+                ax4.legend()
             elif has_val_data:
                 val_steps_safe = self.val_steps[:len(self.val_losses)]
                 val_losses_safe = self.val_losses[:len(val_steps_safe)]
                 if len(val_steps_safe) == len(val_losses_safe) and len(val_steps_safe) > 0:
-                    ax3.plot(val_steps_safe, val_losses_safe, 'r-', alpha=0.3, linewidth=0.8, label='Raw Validation')
+                    ax4.plot(val_steps_safe, val_losses_safe, 'r-', alpha=0.3, linewidth=0.8, label='Raw Validation')
                     if len(val_losses_safe) > self.smoothing_window:
                         smoothed_val = self._smooth_data(val_losses_safe)
-                        ax3.plot(val_steps_safe, smoothed_val, 'r-', alpha=0.8, linewidth=2, label='Smoothed Validation')
-                ax3.set_xlabel('Global Step')
-                ax3.set_ylabel('Loss')
-                ax3.set_title('Validation Loss Only')
-                ax3.grid(True, alpha=0.3)
-                ax3.legend()
+                        ax4.plot(val_steps_safe, smoothed_val, 'r-', alpha=0.8, linewidth=2, label='Smoothed Validation')
+                ax4.set_xlabel('Global Step')
+                ax4.set_ylabel('Loss')
+                ax4.set_title('Validation Loss Only')
+                ax4.grid(True, alpha=0.3)
+                ax4.legend()
             else:
-                ax3.text(0.5, 0.5, 'No loss data available', ha='center', va='center', transform=ax3.transAxes)
-                ax3.set_title('Training vs Validation Loss')
+                ax4.text(0.5, 0.5, 'No loss data available', ha='center', va='center', transform=ax4.transAxes)
+                ax4.set_title('Training vs Validation Loss')
                 
-            # Plot 4: AUROC (if available)
-            ax4 = axes[1][1]
+            # Plot 5: AUROC (moved to bottom middle)
+            ax5 = axes[1][1]
             if self.val_aurocs and len(self.val_aurocs) > 0:
                 # Create epoch-based x-axis for AUROC since it's computed per epoch
                 val_epochs = list(range(len(self.val_aurocs)))
-                ax4.plot(val_epochs, self.val_aurocs, 'g-', label='Validation AUROC', alpha=0.8)
+                ax5.plot(val_epochs, self.val_aurocs, 'g-', label='Validation AUROC', alpha=0.8)
                 if self.train_aurocs and len(self.train_aurocs) > 0:
                     # Align training AUROC epochs with validation
                     train_epochs = list(range(len(self.train_aurocs)))
-                    ax4.plot(train_epochs, self.train_aurocs, 'orange', label='Training AUROC', alpha=0.8)
-                ax4.set_xlabel('Epoch')
-                ax4.set_ylabel('AUROC')
-                ax4.set_title('AUROC Progress')
-                ax4.set_ylim(0, 1)
-                ax4.grid(True, alpha=0.3)
-                ax4.legend()
+                    ax5.plot(train_epochs, self.train_aurocs, 'orange', label='Training AUROC', alpha=0.8)
+                ax5.set_xlabel('Epoch')
+                ax5.set_ylabel('AUROC')
+                ax5.set_title('AUROC Progress')
+                ax5.set_ylim(0, 1)
+                ax5.grid(True, alpha=0.3)
+                ax5.legend()
                 
                 # Add best AUROC annotation (using epoch-based data)
                 if val_epochs:
-                    self._add_best_metrics_annotation(ax4, 'val/auroc_subject', val_epochs, 'AUROC Progress')
+                    self._add_best_metrics_annotation(ax5, 'val/auroc_subject', val_epochs, 'AUROC Progress')
             else:
-                ax4.text(0.5, 0.5, 'AUROC not available', ha='center', va='center', transform=ax4.transAxes)
-                ax4.set_title('AUROC Progress')
+                ax5.text(0.5, 0.5, 'AUROC not available', ha='center', va='center', transform=ax5.transAxes)
+                ax5.set_title('AUROC Progress')
+                
+            # Plot 6: Additional metrics or summary (bottom right) - currently unused
+            ax6 = axes[1][2]
+            ax6.text(0.5, 0.5, 'Additional metrics\n(reserved for future use)', 
+                     ha='center', va='center', transform=ax6.transAxes,
+                     bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray", alpha=0.5))
+            ax6.set_title('Additional Metrics')
                 
             plt.tight_layout()
             

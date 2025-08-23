@@ -11,6 +11,10 @@ task1_config = {
     "task_type": "classification",
     "label_extension": ".txt",
     "labels": {0: "Negative", 1: "Positive"},
+    # Spacing and size configuration from training runs
+    "target_spacing": [0.7188, 0.7188, 6.5000],  # Dominant modality spacing
+    "target_size": [96, 96, 96],
+    "patch_size": [96, 96, 96],
 }
 
 task2_config = {
@@ -22,7 +26,7 @@ task2_config = {
     "norm_op": "volume_wise_znorm", 
     "num_classes": 2,  # background (0) + meningioma (1)
     "num_modalities": 3,  # Number of input modalities
-    "patch_size": [64, 64, 30],  # Use full depth (30) - take entire depth
+    "patch_size": [320, 320, 20],  # Corrected from training runs - was [64, 64, 30]
     "model_name": "unet_xl",  # Correct lowercase model name
     "version_dir": "./runs/Task002_FOMO2",  # Default output directory
     "keep_aspect_ratio": True,
@@ -35,6 +39,9 @@ task2_config = {
     "modality_to_global_group": {"DWI": "dwi", "T2FLAIR": "flair", "SWI_OR_T2STAR": "other"},
     "global_vocab": ["t1", "t2", "flair", "dwi", "other"],
     "fusion_type": "attention",  # Use attention fusion for Task 2
+    # Spacing and size configuration from training runs
+    "target_spacing": [0.4500, 0.4500, 5.0000],  # From training runs
+    "target_size": None,                           # Full volume segmentation - no size constraints
 }
 
 task3_config = {
@@ -48,6 +55,10 @@ task3_config = {
     "task_type": "regression",
     "label_extension": ".txt",
     "labels": {"regression": "Age"},  # Define as regression task
+    # Spacing and size configuration
+    "target_spacing": [0.5078, 0.7917, 6.0000],  # Already correctly configured
+    "target_size": [256, 256, 32],
+    "patch_size": [256, 256, 32],
 }
 
 hbn_config = {

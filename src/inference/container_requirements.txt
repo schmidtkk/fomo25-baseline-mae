@@ -17,7 +17,7 @@ numpy>=1.23,<2.0
 scipy>=1.9.0
 
 # Image processing
-opencv-python>=4.8.0
+opencv-python>=4.8.1.78
 Pillow>=9.0.0
 
 # Data handling
@@ -30,6 +30,10 @@ yucca==2.2.6
 # Utilities
 einops>=0.7.0
 tqdm>=4.64.0
+
+# Additional dependencies
+nnunetv2>=2.4.2
+wandb>=0.16.0
 
 # Optional: Accelerated inference
 # onnx>=1.14.0

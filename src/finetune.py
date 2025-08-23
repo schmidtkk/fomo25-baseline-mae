@@ -8,6 +8,7 @@ import lightning as L
 # import wandb
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.callbacks.early_stopping import EarlyStopping
+from lightning.pytorch.strategies import DDPStrategy
 
 from models.supervised_base import BaseSupervisedModel
 from augmentations.finetune_augmentation_presets import (
@@ -46,7 +47,7 @@ from yucca.pipeline.configuration.configure_paths import detect_version
 from data.dataset import CLSDataset
 from data.dataset_fusion import FusionCLSDataset
 from data.task_configs import task1_config, task2_config, task3_config, hbn_config
-from torch.utils.data import SequentialSampler
+from torch.utils.data import SequentialSampler, RandomSampler
 
 
 def get_task_config(taskid):
@@ -479,7 +480,46 @@ def main():
     effective_batch_size = args.num_devices * args.batch_size
     train_dataset_size = len(splits_config.train(args.split_idx))
     val_dataset_size = len(splits_config.val(args.split_idx))
-    max_iterations = int(args.epochs * args.train_batches_per_epoch)
+    
+    # Fix distributed GPU training: calculate actual steps per epoch
+    # In DDP mode, dataset is automatically sharded across GPUs
+    if args.num_devices > 1:
+        # Calculate steps per epoch based on actual dataset and batch size per GPU
+        # Each GPU processes (dataset_size / num_devices) samples
+        # Steps per GPU = ceil(samples_per_gpu / batch_size_per_gpu)
+        import math
+        samples_per_gpu = math.ceil(train_dataset_size / args.num_devices)
+        steps_per_gpu = math.ceil(samples_per_gpu / args.batch_size)
+        actual_train_batches_per_epoch = steps_per_gpu
+        
+        # Validation: ensure we don't get unreasonably small values
+        if actual_train_batches_per_epoch < 5:
+            logging.warning(f"Very few steps per epoch ({actual_train_batches_per_epoch}). "
+                          f"Consider increasing batch size or using fewer GPUs.")
+        
+        logging.info(f"🚀 DDP Mode Detected: {args.num_devices} GPUs")
+        logging.info(f"📊 Dataset: {train_dataset_size} samples, {samples_per_gpu} per GPU")
+        logging.info(f"🎯 Batch size per GPU: {args.batch_size}, Steps per GPU: {steps_per_gpu}")
+        logging.info(f"⚡ Fixed train_batches_per_epoch: {args.train_batches_per_epoch} -> {actual_train_batches_per_epoch}")
+        logging.info(f"📈 Effective batch size: {effective_batch_size}, Coverage: 100% per epoch")
+    else:
+        # Single GPU mode: use original calculation or provided value
+        if args.train_batches_per_epoch == 100:  # Default value, auto-calculate
+            import math
+            actual_train_batches_per_epoch = math.ceil(train_dataset_size / args.batch_size)
+            logging.info(f"🖥️  Single GPU Mode: Auto-calculated train_batches_per_epoch = {actual_train_batches_per_epoch}")
+        else:
+            # User provided explicit value, keep it
+            actual_train_batches_per_epoch = args.train_batches_per_epoch
+            logging.info(f"🖥️  Single GPU Mode: Using provided train_batches_per_epoch = {actual_train_batches_per_epoch}")
+    
+    # Final validation and reporting
+    samples_per_epoch_total = actual_train_batches_per_epoch * effective_batch_size
+    epoch_coverage = min(samples_per_epoch_total / train_dataset_size, 1.0) * 100
+    logging.info(f"✅ Epoch Configuration: {actual_train_batches_per_epoch} steps, "
+                f"{samples_per_epoch_total} samples, {epoch_coverage:.1f}% coverage")
+    
+    max_iterations = int(args.epochs * actual_train_batches_per_epoch)
 
     # the config contains all the parameters needed for training and is used by lightning module, data module, and trainer
     config = {
@@ -527,7 +567,7 @@ def main():
         "precision": args.precision,
         "augmentation_preset": args.augmentation_preset,
         "epochs": args.epochs,
-        "train_batches_per_epoch": args.train_batches_per_epoch,
+        "train_batches_per_epoch": actual_train_batches_per_epoch,
         "effective_batch_size": effective_batch_size,
 
 		# Optimizer schedule (enable lower LR for encoders and optional freeze)
@@ -588,21 +628,52 @@ def main():
     if task_type == "classification" and num_classes == 2:
         monitor_metric = "val/auroc_subject"
         monitor_mode = "max"
+        # Single checkpoint callback for classification
+        checkpoint_callback = EnhancedModelCheckpoint(
+            monitor=monitor_metric,
+            mode=monitor_mode,
+            save_top_k=1,
+            filename="best",
+            enable_version_counter=False,
+        )
+        callbacks_list = [checkpoint_callback]
     elif task_type == "regression":
-        monitor_metric = "val/corr"  # Use correlation for brain age regression
+        # Dual checkpoint system for Task 3: save both best correlation and best MAE
+        monitor_metric = "val/corr"  # Primary metric remains correlation
         monitor_mode = "max"
+        
+        # Checkpoint for best correlation (primary metric)
+        checkpoint_callback_corr = EnhancedModelCheckpoint(
+            monitor="val/corr",
+            mode="max",
+            save_top_k=1,
+            filename="best_corr",
+            enable_version_counter=False,
+        )
+        
+        # Checkpoint for best MAE (secondary metric)
+        checkpoint_callback_mae = EnhancedModelCheckpoint(
+            monitor="val/mae",
+            mode="min", 
+            save_top_k=1,
+            filename="best_mae",
+            enable_version_counter=False,
+        )
+        
+        checkpoint_callback = checkpoint_callback_corr  # Keep primary for compatibility
+        callbacks_list = [checkpoint_callback_corr, checkpoint_callback_mae]
     else:
         monitor_metric = "val/loss"
         monitor_mode = "min"
-
-    # Enhanced checkpoint callback with terminal feedback
-    checkpoint_callback = EnhancedModelCheckpoint(
-        monitor=monitor_metric,
-        mode=monitor_mode,
-        save_top_k=1,
-        filename="best",
-        enable_version_counter=False,
-    )
+        # Single checkpoint callback for segmentation
+        checkpoint_callback = EnhancedModelCheckpoint(
+            monitor=monitor_metric,
+            mode=monitor_mode,
+            save_top_k=1,
+            filename="best",
+            enable_version_counter=False,
+        )
+        callbacks_list = [checkpoint_callback]
     
     # Loss plotting callback that shares log_every_n_steps parameter
     loss_plotting_callback = LossPlottingCallback(
@@ -640,7 +711,8 @@ def main():
         smoothing_window=args.smoothing_window
     )
     
-    callbacks = [checkpoint_callback, loss_plotting_callback, metrics_stability_callback, smooth_logging_callback]
+    # Build callbacks list - use callbacks_list for checkpoint(s), add other callbacks
+    callbacks = callbacks_list + [loss_plotting_callback, metrics_stability_callback, smooth_logging_callback]
     
     if not args.disable_early_stop:
         early_stop = EarlyStopping(
@@ -655,7 +727,7 @@ def main():
     yucca_logger = YuccaLogger(
         save_dir=experiment_dir,
         version=version,
-        steps_per_epoch=args.train_batches_per_epoch,
+        steps_per_epoch=actual_train_batches_per_epoch,
     )
     loggers = [yucca_logger]
 
@@ -669,7 +741,10 @@ def main():
         logging.debug(f"Best checkpoints monitor: {monitor_metric}")
     elif task_type == "regression":
         logging.debug("Pearson correlation monitoring (val/corr) for brain age regression")
-        logging.debug(f"Best checkpoints monitor: {monitor_metric}")
+        logging.debug("DUAL CHECKPOINT SYSTEM for Task 3:")
+        logging.debug("  - best_corr.ckpt: Saves highest validation correlation")
+        logging.debug("  - best_mae.ckpt: Saves lowest validation MAE") 
+        logging.debug(f"Primary monitor (early stopping): {monitor_metric}")
         logging.debug("Enhanced metrics: MAE and Pearson Correlation")
     else:
         logging.debug("Loss stability monitoring for other tasks")
@@ -714,6 +789,9 @@ def main():
     # Choose dataset class: FusionCLSDataset if folder-style fusion preprocessing detected
     dataset_cls = FusionCLSDataset if use_fusion else CLSDataset
 
+    # Use RandomSampler for multi-GPU to avoid infinite sampler issues
+    train_sampler = RandomSampler if args.num_devices > 1 else None
+
     data_module = YuccaDataModule(
         train_dataset_class=dataset_cls,  # Supports both stacked and per-modality fusion
         composed_train_transforms=train_transforms,
@@ -726,6 +804,7 @@ def main():
         splits_config=splits_config,
         split_idx=config["split_idx"],
         num_workers=args.num_workers,
+        train_sampler=train_sampler,
         val_sampler=SequentialSampler,
     )
     # If the YuccaDataModule exposes val_batch_size, set it when available
@@ -839,17 +918,24 @@ def main():
         else:
             logging.info(f"All TRAINABLE: {counts['trainable']:,} params (~{counts['total'] * 4 / 1024**2:.1f} MB fp32)")
 
+    # Configure strategy based on number of devices
+    if args.num_devices > 1:
+        # Use DDP with unused parameter detection for multi-modal fusion models
+        strategy = DDPStrategy(find_unused_parameters=True)
+    else:
+        strategy = "auto"
+
     # Create Lightning trainer
     trainer = L.Trainer(
         callbacks=callbacks,
         logger=loggers,
         accelerator="auto" if torch.cuda.is_available() else "cpu",
-        strategy="auto",
+        strategy=strategy,
         num_nodes=1,
         devices=args.num_devices,
         default_root_dir=experiment_dir,
         max_epochs=args.epochs,
-        limit_train_batches=args.train_batches_per_epoch,
+        limit_train_batches=actual_train_batches_per_epoch,
         precision=args.precision,
         fast_dev_run=args.fast_dev_run,
         log_every_n_steps=int(max(1, args.log_every_n_steps)),

@@ -41,7 +41,11 @@ class InferenceAggregator:
         self.tta_config = tta_config or {}
         self.ensemble_config = ensemble_config or {}
         self.uncertainty_config = uncertainty_config or {}
-        self.device = next(base_model.parameters()).device
+        try:
+            self.device = next(base_model.parameters()).device
+        except StopIteration:
+            # Fallback for testing or models without parameters
+            self.device = torch.device('cpu')
     
     def predict(self, input_data: torch.Tensor) -> torch.Tensor:
         """Run inference with configured aggregation methods."""
@@ -52,48 +56,36 @@ class InferenceAggregator:
             base_pred = self.base_model(input_data)
             predictions.append(base_pred)
         
-        # Test-Time Augmentation
+        # Apply TTA if enabled
         if self.tta_config.get('enable', False):
             tta_predictions = self._apply_tta(input_data)
             predictions.extend(tta_predictions)
         
-        # Ensemble predictions from additional models
+        # Apply ensemble if enabled
         if self.ensemble_config.get('enable', False):
             ensemble_predictions = self._apply_ensemble(input_data)
             predictions.extend(ensemble_predictions)
         
         # Aggregate all predictions
-        if len(predictions) == 1:
-            final_prediction = predictions[0]
-        else:
-            # Simple averaging for now (can be enhanced with weighting)
-            final_prediction = torch.mean(torch.stack(predictions), dim=0)
+        aggregation_method = self.tta_config.get('aggregation', 'mean')
+        aggregated = self._aggregate_predictions(predictions, method=aggregation_method)
         
         # Apply uncertainty estimation if requested
         if self.uncertainty_config.get('enable', False):
-            uncertainty_results = self._estimate_uncertainty(predictions)
-            # For now, just return the mean prediction
-            final_prediction = uncertainty_results['prediction']
+            uncertainty_result = self._estimate_uncertainty(predictions)
+            # For now, just return the prediction (could be extended to return uncertainty)
+            return uncertainty_result['prediction']
         
-        return final_prediction
+        return aggregated
     
     def _apply_tta(self, input_data: torch.Tensor) -> List[torch.Tensor]:
         """Apply Test-Time Augmentation transformations."""
         tta_predictions = []
-        transforms = self.tta_config.get('transforms', ['flip_x', 'flip_y', 'flip_z'])
+        transforms = self.tta_config.get('transforms', ['original', 'flip_x', 'flip_y', 'flip_z'])
         
         for transform in transforms:
-            # Apply forward transform
-            if transform == 'flip_x':
-                augmented = torch.flip(input_data, dims=[-3])
-            elif transform == 'flip_y':
-                augmented = torch.flip(input_data, dims=[-2])
-            elif transform == 'flip_z':
-                augmented = torch.flip(input_data, dims=[-1])
-            elif transform == 'original':
-                augmented = input_data
-            else:
-                continue  # Skip unknown transforms
+            # Apply forward transform using the comprehensive method
+            augmented = self._apply_flip_transform(input_data, transform)
             
             # Run inference on augmented data
             with torch.no_grad():
@@ -148,6 +140,40 @@ class InferenceAggregator:
             'confidence': confidence.item(),
             'num_predictions': len(predictions)
         }
+    
+    def _apply_flip_transform(self, input_data: torch.Tensor, transform: str) -> torch.Tensor:
+        """Apply a specific flip transformation to input data."""
+        if transform == 'original':
+            return input_data
+        elif transform == 'flip_x':
+            return torch.flip(input_data, dims=[-3])
+        elif transform == 'flip_y':
+            return torch.flip(input_data, dims=[-2])
+        elif transform == 'flip_z':
+            return torch.flip(input_data, dims=[-1])
+        elif transform == 'flip_xy':
+            return torch.flip(input_data, dims=[-3, -2])
+        elif transform == 'flip_xz':
+            return torch.flip(input_data, dims=[-3, -1])
+        elif transform == 'flip_yz':
+            return torch.flip(input_data, dims=[-2, -1])
+        elif transform == 'flip_xyz':
+            return torch.flip(input_data, dims=[-3, -2, -1])
+        else:
+            return input_data
+    
+    def _aggregate_predictions(self, predictions: List[torch.Tensor], method: str = 'mean') -> torch.Tensor:
+        """Aggregate multiple predictions using specified method."""
+        predictions_tensor = torch.stack(predictions)
+        
+        if method == 'mean':
+            return torch.mean(predictions_tensor, dim=0)
+        elif method == 'median':
+            return torch.median(predictions_tensor, dim=0)[0]
+        elif method == 'max':
+            return torch.max(predictions_tensor, dim=0)[0]
+        else:
+            return torch.mean(predictions_tensor, dim=0)  # Default to mean
 
 
 def create_tta_config(args) -> dict:

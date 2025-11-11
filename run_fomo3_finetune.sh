@@ -41,7 +41,7 @@ PYTHONPATH=src /home/weidongguo/miniconda3/envs/fomo/bin/python src/finetune.py 
   --num_sanity_val_steps 0 \
   --disable_early_stop \
   --augmentation_preset basic \
-  --val_tta_enable --val_tta_views 4 --val_tta_offsets 3 \
+  # DISABLED FOR ACCURACY: --val_tta_enable --val_tta_views 4 --val_tta_offsets 3 \
   --smoothing_window 10 \
   --experiment "fomo3_brain_age"
 

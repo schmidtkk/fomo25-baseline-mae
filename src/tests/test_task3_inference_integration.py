@@ -131,6 +131,8 @@ class TestTask3InferenceIntegration:
         # Mock modality loading (T1 and T2)
         mock_nifti_img = MagicMock()
         mock_nifti_img.affine = torch.eye(4).numpy()
+        # Add shape attribute that Yucca preprocessing expects (3D for medical images)
+        mock_nifti_img.shape = (256, 256, 32)  # [H, W, D] format
         mock_load_modalities.return_value = [mock_nifti_img, mock_nifti_img]
         
         # Mock preprocessing

@@ -15,11 +15,11 @@ echo ""
 
 # Configuration  
 SCRIPT_DIR="$(cd "$(dirname "$0")" > /dev/null 2>&1 && pwd)"
-PYTHONPATH=src
+export PYTHONPATH="${SCRIPT_DIR}/src:${SCRIPT_DIR}"
 
 # Experiment parameters
 EXPERIMENT_BASE="fomo3_brain_age_256_kfold"
-DATA_DIR="/data/weidong/fomo-finetune"
+DATA_DIR="/data/weidong/fomo-finetune/Task003_FOMO3_fusion"
 SAVE_DIR="./runs"
 RESULTS_DIR="${SAVE_DIR}/Task003_FOMO3"
 RESULTS_FILE="${RESULTS_DIR}/kfold_results_summary.txt"
@@ -32,8 +32,8 @@ COMMON_ARGS="--taskid 3 \
   --fusion_mode fusion \
   --fusion_type attention \
   --modality_mapping T1=t1,T2=t2 \
-  --t1_ckpt ckpt/t1.ckpt \
-  --t2_ckpt ckpt/t2.ckpt \
+  --t1_ckpt ../ckpt/t1.ckpt \
+  --t2_ckpt ../ckpt/t2.ckpt \
   --precision bf16-mixed \
   --patch_size=256,256,32 \
   --epochs 100 \
@@ -120,7 +120,7 @@ for fold in 0 1 2 3 4; do
     echo "📚 Training with fold ${fold} as validation set..."
     
     # Execute training
-    if PYTHONPATH=src /home/weidongguo/miniconda3/envs/fomo/bin/python src/finetune.py \
+    if cd task3 && python scripts/train_task3.py \
         $COMMON_ARGS \
         $VALIDATION_ARGS \
         --k_folds ${TOTAL_FOLDS} \
@@ -144,7 +144,7 @@ for fold in 0 1 2 3 4; do
             METRICS_FILE="${FOLD_RESULT_DIR}/metrics.csv"
             if [[ -f "${METRICS_FILE}" ]]; then
                 # Extract best validation metrics using Python
-                BEST_METRICS=$(PYTHONPATH=src python -c "
+                BEST_METRICS=$(python -c "
 import pandas as pd
 import numpy as np
 
@@ -214,7 +214,7 @@ echo "⏱️  Total Runtime: ${TOTAL_HOURS}h ${TOTAL_MINUTES}m"
 
 # Aggregate results using our utility script
 echo "🔍 Aggregating cross-validation results..."
-if PYTHONPATH=src python src/utils/aggregate_kfold_results.py \
+if python src/utils/aggregate_kfold_results.py \
     --results_dir "${SAVE_DIR}/Task003_FOMO3/unet_xl" \
     --experiment_pattern "${EXPERIMENT_BASE}_fold*" \
     --output_file "${RESULTS_FILE}" \

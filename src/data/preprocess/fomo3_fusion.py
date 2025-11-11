@@ -65,6 +65,7 @@ def process_subject(task_info):
             allow_missing_modalities=False,
             crop_to_nonzero=pp_config["crop_to_nonzero"],
             target_spacing=pp_config.get("target_spacing", None),  # Use task-specific spacing
+            target_size=pp_config.get("target_size", None),        # CRITICAL: Add missing target_size parameter
         )
 
         # Normalize return type (yucca version differences)

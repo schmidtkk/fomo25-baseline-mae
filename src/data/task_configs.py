@@ -13,7 +13,7 @@ task1_config = {
     "labels": {0: "Negative", 1: "Positive"},
     # Spacing and size configuration from training runs
     "target_spacing": [0.7188, 0.7188, 6.5000],  # Dominant modality spacing
-    "target_size": [96, 96, 96],
+    "target_size": None, # Critial: Must be set to None
     "patch_size": [96, 96, 96],
 }
 
@@ -41,7 +41,7 @@ task2_config = {
     "fusion_type": "attention",  # Use attention fusion for Task 2
     # Spacing and size configuration from training runs
     "target_spacing": [0.4500, 0.4500, 5.0000],  # From training runs
-    "target_size": None,                           # Full volume segmentation - no size constraints
+    "target_size": None, # Critial: Must be set to None
 }
 
 task3_config = {
@@ -57,7 +57,7 @@ task3_config = {
     "labels": {"regression": "Age"},  # Define as regression task
     # Spacing and size configuration
     "target_spacing": [0.5078, 0.7917, 6.0000],  # Already correctly configured
-    "target_size": [256, 256, 32],
+    "target_size": None, # Critial: Must be set to None
     "patch_size": [256, 256, 32],
 }
 

@@ -240,6 +240,29 @@ class EnhancedModelCheckpoint(ModelCheckpoint):
         
         # Always create/update comprehensive metrics file when checkpoint is saved
         self._create_comprehensive_metrics_file(trainer, filepath, current_metrics)
+        
+    def on_validation_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        """Update best metrics tracking after each validation epoch.
+        
+        This ensures metrics are tracked consistently even when checkpoints aren't saved.
+        This is the critical fix for the issue where best metrics were stuck at epoch 0.
+        """
+        # Get current metrics
+        current_metrics = self._get_current_metrics(trainer)
+        
+        # Update best metrics tracking (this will save to file if any new best is found)
+        any_new_best = self._update_best_metrics(current_metrics, trainer)
+        
+        if any_new_best:
+            # Log info about new best metrics found (but not related to checkpoint saving)
+            logging.debug(f"New best metrics found at epoch {trainer.current_epoch}, step {trainer.global_step}")
+            for metric_name, metric_value in current_metrics.items():
+                if metric_name in self.best_metrics and metric_value is not None:
+                    best_info = self.best_metrics[metric_name]
+                    is_current_best = abs(metric_value - best_info['value']) < 1e-8 and \
+                                    best_info['epoch'] == trainer.current_epoch
+                    if is_current_best:
+                        logging.debug(f"  {metric_name}: {metric_value:.6f} (new best)")
             
     def _get_current_metrics(self, trainer: Trainer) -> Dict[str, float]:
         """Extract current metrics from trainer."""

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-K-Fold Cross-Validation Results Aggregation Utility
+K-Fold Cross-Validation Results Aggregation Utility for FOMO Task 1
 
-Aggregates metrics across K folds and computes statistics for FOMO Task3.
+Aggregates classification metrics across K folds and computes statistics for Task 1 infarct detection.
+Focuses on classification-specific metrics: AUROC, F1, Accuracy, Precision, Recall.
 """
 
 import os
@@ -20,48 +21,65 @@ logger = logging.getLogger(__name__)
 
 def extract_metrics_from_tensorboard_logs(experiment_dir: str, target_metrics: List[str]) -> Dict[str, float]:
     """
-    Extract best metrics from TensorBoard logs using wandb or PyTorch Lightning logs.
+    Extract best metrics from TensorBoard logs or best_metrics.txt file.
     
     Args:
         experiment_dir: Path to experiment directory (e.g., version_0)
-        target_metrics: List of metric names to extract (e.g., ['val/corr', 'val/mae'])
+        target_metrics: List of metric names to extract (e.g., ['val/auroc_subject', 'val/f1'])
         
     Returns:
         Dictionary of metric_name -> best_value
     """
     metrics_dict = {}
     
-    # Look for metrics.csv (PyTorch Lightning default)
-    metrics_csv = os.path.join(experiment_dir, "metrics.csv")
-    
-    if os.path.exists(metrics_csv):
-        logger.debug(f"Loading metrics from: {metrics_csv}")
+    # First try to read from best_metrics.txt (our enhanced tracking)
+    best_metrics_file = os.path.join(experiment_dir, "checkpoints", "best_metrics.txt")
+    if os.path.exists(best_metrics_file):
+        logger.debug(f"Loading best metrics from: {best_metrics_file}")
         try:
-            df = pd.read_csv(metrics_csv)
-            
-            for metric in target_metrics:
-                if metric in df.columns:
-                    # Get best value (max for correlation, min for MAE/loss)
-                    valid_values = df[metric].dropna()
-                    if len(valid_values) > 0:
-                        if 'corr' in metric.lower() or 'r2' in metric.lower():
-                            # Higher is better for correlation/R²
-                            metrics_dict[metric] = valid_values.max()
-                        else:
-                            # Lower is better for MAE/MSE/loss
-                            metrics_dict[metric] = valid_values.min()
-                        
-                        logger.debug(f"  {metric}: {metrics_dict[metric]:.4f}")
-        
+            with open(best_metrics_file, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith('Best ') and ':' in line:
+                        # Parse line like "Best val/auroc_subject: 0.234567 (epoch 45, step 1234)"
+                        parts = line.split(': ', 1)
+                        if len(parts) == 2:
+                            metric_name = parts[0].replace('Best ', '')
+                            if metric_name in target_metrics:
+                                value_str = parts[1].split(' (')[0]
+                                try:
+                                    metrics_dict[metric_name] = float(value_str)
+                                    logger.debug(f"  {metric_name}: {metrics_dict[metric_name]:.4f}")
+                                except ValueError:
+                                    continue
         except Exception as e:
-            logger.warning(f"Failed to read metrics.csv: {e}")
+            logger.warning(f"Failed to read best_metrics.txt: {e}")
     
-    # Also try to extract from hparams.yaml if available
-    hparams_file = os.path.join(experiment_dir, "hparams.yaml")
-    if os.path.exists(hparams_file) and not metrics_dict:
-        logger.debug(f"Trying hparams.yaml: {hparams_file}")
-        # This is a fallback - usually metrics aren't in hparams
-        
+    # Fallback to metrics.csv if best_metrics.txt unavailable or incomplete
+    if len(metrics_dict) < len(target_metrics):
+        metrics_csv = os.path.join(experiment_dir, "metrics.csv")
+        if os.path.exists(metrics_csv):
+            logger.debug(f"Loading metrics from: {metrics_csv}")
+            try:
+                df = pd.read_csv(metrics_csv)
+                
+                for metric in target_metrics:
+                    if metric not in metrics_dict and metric in df.columns:
+                        # Get best value (max for AUROC/accuracy/F1, min for loss)
+                        valid_values = df[metric].dropna()
+                        if len(valid_values) > 0:
+                            if any(x in metric.lower() for x in ['auroc', 'accuracy', 'f1', 'precision', 'recall']):
+                                # Higher is better for classification metrics
+                                metrics_dict[metric] = valid_values.max()
+                            else:
+                                # Lower is better for loss
+                                metrics_dict[metric] = valid_values.min()
+                            
+                            logger.debug(f"  {metric}: {metrics_dict[metric]:.4f}")
+            
+            except Exception as e:
+                logger.warning(f"Failed to read metrics.csv: {e}")
+    
     return metrics_dict
 
 
@@ -70,8 +88,8 @@ def find_experiment_directories(results_dir: str, experiment_pattern: str) -> Li
     Find all experiment directories matching the pattern.
     
     Args:
-        results_dir: Base results directory (e.g., ./runs/Task003_FOMO3/unet_xl)
-        experiment_pattern: Pattern to match experiment names (e.g., "fomo3_brain_age_256_kfold_fold*")
+        results_dir: Base results directory (e.g., ./runs/Task001_FOMO1/unet_xl)
+        experiment_pattern: Pattern to match experiment names (e.g., "fomo1_kfold_fold*")
         
     Returns:
         List of paths to experiment directories
@@ -98,7 +116,7 @@ def find_experiment_directories(results_dir: str, experiment_pattern: str) -> Li
 
 def extract_fold_number(experiment_dir: str) -> int:
     """Extract fold number from experiment directory path."""
-    # Look for fold number in path: ...fomo3_brain_age_256_kfold_fold3/version_0
+    # Look for fold number in path: ...fomo1_kfold_fold3/version_0
     parts = experiment_dir.split('/')
     for part in parts:
         if 'fold' in part:
@@ -164,100 +182,6 @@ def aggregate_kfold_metrics(experiment_dirs: List[str], target_metrics: List[str
     return aggregated
 
 
-def aggregate_kfold_results(experiment_dirs: List[str], target_metrics: List[str]) -> Dict[str, Dict[str, float]]:
-    """
-    Wrapper function for aggregate_kfold_metrics to match test expectations.
-
-    Args:
-        experiment_dirs: List of experiment directory paths
-        target_metrics: List of metric names to aggregate
-
-    Returns:
-        Dictionary with aggregated statistics per metric
-    """
-    return aggregate_kfold_metrics(experiment_dirs, target_metrics)
-
-
-def format_results_report(aggregated_metrics: Dict[str, Dict[str, float]],
-                         fold_metrics: Optional[Dict[int, Dict[str, float]]] = None) -> str:
-    """
-    Format aggregated results into a human-readable report string.
-
-    Args:
-        aggregated_metrics: Aggregated statistics per metric
-        fold_metrics: Optional individual fold metrics
-
-    Returns:
-        Formatted report string
-    """
-    lines = []
-    lines.append("FOMO Task 3 - 5-Fold Cross-Validation Results")
-    lines.append("=" * 50)
-    lines.append("")
-
-    # Summary statistics
-    lines.append("AGGREGATED METRICS SUMMARY")
-    lines.append("-" * 30)
-
-    for metric, stats in aggregated_metrics.items():
-        metric_display = metric.replace('val/', '').upper()
-        lines.append(f"{metric_display}:")
-        lines.append(".4f")
-        lines.append(f"  Range: {stats['min']:.4f} - {stats['max']:.4f}")
-        lines.append(f"  Median: {stats['median']:.4f}")
-        lines.append(f"  Folds: {stats['n_folds']}/5")
-        lines.append("")
-
-    # Individual fold details
-    if fold_metrics:
-        lines.append("INDIVIDUAL FOLD RESULTS")
-        lines.append("-" * 25)
-
-        for fold_idx in sorted(fold_metrics.keys()):
-            fold_data = fold_metrics[fold_idx]
-            lines.append(f"Fold {fold_idx}:")
-            for metric, value in fold_data.items():
-                lines.append(f"  {metric}: {value:.4f}")
-            lines.append("")
-
-    return "\n".join(lines)
-
-
-def get_clinical_interpretation(aggregated_metrics: Dict[str, Dict[str, float]]) -> Dict[str, str]:
-    """
-    Provide clinical interpretation of the aggregated metrics.
-
-    Args:
-        aggregated_metrics: Aggregated statistics per metric
-
-    Returns:
-        Dictionary with clinical interpretations
-    """
-    interpretation = {}
-
-    if 'val/corr' in aggregated_metrics:
-        corr_mean = aggregated_metrics['val/corr']['mean']
-        if corr_mean >= 0.8:
-            interpretation['correlation'] = "Excellent brain age prediction performance"
-        elif corr_mean >= 0.7:
-            interpretation['correlation'] = "Good brain age prediction performance"
-        elif corr_mean >= 0.6:
-            interpretation['correlation'] = "Moderate brain age prediction performance"
-        else:
-            interpretation['correlation'] = "Poor brain age prediction performance"
-
-    if 'val/mae' in aggregated_metrics:
-        mae_mean = aggregated_metrics['val/mae']['mean']
-        if mae_mean <= 3.0:
-            interpretation['mae'] = "High prediction accuracy"
-        elif mae_mean <= 5.0:
-            interpretation['mae'] = "Moderate prediction accuracy"
-        else:
-            interpretation['mae'] = "Low prediction accuracy"
-
-    return interpretation
-
-
 def save_aggregated_results(aggregated_metrics: Dict[str, Dict[str, float]], 
                            output_file: str, 
                            fold_metrics: Optional[Dict[int, Dict[str, float]]] = None) -> None:
@@ -272,7 +196,7 @@ def save_aggregated_results(aggregated_metrics: Dict[str, Dict[str, float]],
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
     
     with open(output_file, 'w') as f:
-        f.write("FOMO Task 3 - 5-Fold Cross-Validation Results\n")
+        f.write("FOMO Task 1 - 5-Fold Cross-Validation Results\n")
         f.write("=" * 50 + "\n")
         f.write(f"Generated: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write("\n")
@@ -302,35 +226,38 @@ def save_aggregated_results(aggregated_metrics: Dict[str, Dict[str, float]],
                     f.write(f"  {metric}: {value:.4f}\n")
                 f.write("\n")
         
-        # Performance interpretation
+        # Performance interpretation for Task 1 (Infarct Detection)
         f.write("PERFORMANCE INTERPRETATION\n")
         f.write("-" * 28 + "\n")
         
-        if 'val/corr' in aggregated_metrics:
-            corr_mean = aggregated_metrics['val/corr']['mean']
-            if corr_mean >= 0.8:
+        if 'val/auroc_subject' in aggregated_metrics:
+            auroc_mean = aggregated_metrics['val/auroc_subject']['mean']
+            if auroc_mean >= 0.9:
                 perf_level = "Excellent"
-            elif corr_mean >= 0.7:
+            elif auroc_mean >= 0.8:
                 perf_level = "Good"
-            elif corr_mean >= 0.6:
+            elif auroc_mean >= 0.7:
                 perf_level = "Moderate"
             else:
                 perf_level = "Poor"
             
-            f.write(f"Brain Age Prediction Performance: {perf_level}\n")
-            f.write(f"  Correlation: {corr_mean:.3f} (>0.8=excellent, >0.7=good, >0.6=moderate)\n")
+            f.write(f"Infarct Detection Performance: {perf_level}\n")
+            f.write(f"  Subject-level AUROC: {auroc_mean:.3f} (>0.9=excellent, >0.8=good, >0.7=moderate)\n")
         
-        if 'val/mae' in aggregated_metrics:
-            mae_mean = aggregated_metrics['val/mae']['mean']
-            f.write(f"  Mean Absolute Error: {mae_mean:.2f} years\n")
-            
-            if mae_mean <= 3.0:
-                acc_level = "High"
-            elif mae_mean <= 5.0:
-                acc_level = "Moderate"  
-            else:
-                acc_level = "Low"
-            f.write(f"  Accuracy Level: {acc_level} (<3y=high, <5y=moderate)\n")
+        if 'val/accuracy' in aggregated_metrics:
+            acc_mean = aggregated_metrics['val/accuracy']['mean']
+            f.write(f"  Accuracy: {acc_mean:.3f}\n")
+        
+        if 'val/f1' in aggregated_metrics:
+            f1_mean = aggregated_metrics['val/f1']['mean']
+            f.write(f"  F1 Score: {f1_mean:.3f}\n")
+        
+        # Clinical relevance notes
+        f.write("\nClinical Relevance Notes:\n")
+        f.write("- Subject-level AUROC is most important for clinical decisions\n")
+        f.write("- F1 score balances precision/recall for infarct detection\n")
+        f.write("- High precision reduces false positive diagnoses\n")
+        f.write("- High recall ensures infarcts are not missed\n")
     
     logger.info(f"Results summary saved to: {output_file}")
 
@@ -339,33 +266,33 @@ def main():
     """Command-line interface for K-fold results aggregation."""
     
     parser = argparse.ArgumentParser(
-        description="Aggregate K-fold cross-validation results for FOMO Task3",
+        description="Aggregate K-fold cross-validation results for FOMO Task1",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Basic usage
-  python aggregate_kfold_results.py \\
-    --results_dir ./runs/Task003_FOMO3/unet_xl \\
-    --experiment_pattern "fomo3_brain_age_256_kfold_fold*" \\
-    --metrics val/corr,val/mae
+  # Basic usage for Task 1
+  python aggregate_kfold_task1_results.py \\
+    --results_dir ./runs/Task001_FOMO1/unet_xl \\
+    --experiment_pattern "fomo1_kfold_fold*" \\
+    --metrics val/auroc_subject,val/f1,val/accuracy
 
   # With custom output
-  python aggregate_kfold_results.py \\
-    --results_dir ./runs/Task003_FOMO3/unet_xl \\
-    --experiment_pattern "fomo3_*_kfold_fold*" \\
-    --output_file ./custom_kfold_summary.txt \\
-    --metrics val/corr,val/mae,val/mse
+  python aggregate_kfold_task1_results.py \\
+    --results_dir ./runs/Task001_FOMO1/unet_xl \\
+    --experiment_pattern "fomo1_*_kfold_fold*" \\
+    --output_file ./task1_kfold_summary.txt \\
+    --metrics val/auroc_subject,val/f1,val/accuracy,val/precision,val/recall
         """
     )
     
     parser.add_argument("--results_dir", type=str, required=True,
-                       help="Base results directory (e.g., ./runs/Task003_FOMO3/unet_xl)")
+                       help="Base results directory (e.g., ./runs/Task001_FOMO1/unet_xl)")
     parser.add_argument("--experiment_pattern", type=str, required=True,
-                       help="Pattern to match experiment names (e.g., fomo3_brain_age_256_kfold_fold*)")
-    parser.add_argument("--metrics", type=str, default="val/corr,val/mae",
+                       help="Pattern to match experiment names (e.g., fomo1_kfold_fold*)")
+    parser.add_argument("--metrics", type=str, default="val/auroc_subject,val/f1,val/accuracy",
                        help="Comma-separated list of metrics to aggregate")
     parser.add_argument("--output_file", type=str, 
-                       default="./runs/Task003_FOMO3/kfold_results_summary.txt",
+                       default="./runs/Task001_FOMO1/kfold_results_summary.txt",
                        help="Output file for aggregated results summary")
     parser.add_argument("--verbose", action="store_true",
                        help="Enable verbose logging")
@@ -414,8 +341,8 @@ Examples:
         save_aggregated_results(aggregated_metrics, args.output_file, fold_metrics)
         
         # Print summary
-        print("\n🎉 K-Fold aggregation completed!")
-        print("=" * 40)
+        print("\n🎉 Task 1 K-Fold aggregation completed!")
+        print("=" * 50)
         for metric, stats in aggregated_metrics.items():
             print(f"{metric.replace('val/', '').upper()}: {stats['mean']:.4f} ± {stats['std']:.4f}")
         print(f"📄 Full results: {args.output_file}")
